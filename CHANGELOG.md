@@ -11,6 +11,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Haven uses [Sema
 
 ---
 
+## [3.15.6] — 2026-05-09
+
+Follow-up fixes for personas (#5353).
+
+### Fixed
+- **Persona `::` autocomplete appeared in fullscreen DM view.** The PiP input already suppressed it, but the main `#message-input` (used when you open a DM as a full channel view) still ran `_checkPersonaTrigger`. Added a guard at the top of that function that bails out whenever the active channel is a DM.
+- **Nickname set for a user overrode the persona name on their messages.** Message rendering called `_getNickname(msg.user_id, ...)` unconditionally, so any local nickname for the real account replaced the persona's display name. Persona messages now use `msg.username` (the persona name) directly, bypassing the nickname lookup.
+
+---
+
 ## [3.15.5] — 2026-05-09
 
 Long-standing screen-share reliability fixes. The flow had multiple silent-failure paths that left receivers with audio but no video (or no tile at all). This run unblocks the most common ones with a recovery handshake.
