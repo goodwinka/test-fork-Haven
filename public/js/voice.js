@@ -1292,6 +1292,15 @@ class VoiceManager {
         const knownAsScreen = sourceStream && knownScreenStreamIds.has(sourceStream.id);
         const isScreenAudio = knownAsScreen || (peerIsSharing && streamHasVideo);
 
+        // Race condition guard: for some peers, screen-share audio can arrive
+        // before the corresponding video stream is observed. If we route this
+        // early track into the voice path, users may hear no game/window audio.
+        // Defer ambiguous audio until a matching screen video stream is known.
+        if (!isScreenAudio && peerIsSharing && sourceStream && !knownAsScreen) {
+          deferredAudio.push({ track, sourceStream });
+          return;
+        }
+
         if (isScreenAudio) {
           this._playScreenAudio(userId, sourceStream);
         } else {
