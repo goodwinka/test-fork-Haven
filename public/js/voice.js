@@ -56,6 +56,7 @@ class VoiceManager {
     const savedRes = localStorage.getItem('haven_screen_res');
     this.screenResolution = savedRes !== null ? parseInt(savedRes, 10) : 1080;  // 0 = source
     this.screenFrameRate = parseInt(localStorage.getItem('haven_screen_fps') || '30', 10) || 30;
+    this.screenBitrateMultiplier = parseInt(localStorage.getItem('haven_screen_bitrate_multiplier') || '1', 10) || 1;
 
     // Bitrate map: resolution → bits/sec  (sensible defaults per resolution)
     this._screenBitrates = {
@@ -371,7 +372,7 @@ class VoiceManager {
         });
         // Cap bitrate for this peer
         const res = this.screenResolution;
-        const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
+        const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
         this._applyScreenBitrate(conn, maxBitrate);
       }
 
@@ -778,7 +779,7 @@ class VoiceManager {
       }
 
       // Add screen tracks to all existing peer connections and cap bitrate
-      const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
+      const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
       for (const [userId, peer] of this.peers) {
         this.screenStream.getTracks().forEach(track => {
           peer.connection.addTrack(track, this.screenStream);
@@ -971,6 +972,22 @@ class VoiceManager {
     if (this.isScreenSharing) this._applyLiveQualityChange();
   }
 
+
+  setScreenBitrateMultiplier(multiplier) {
+    const allowed = new Set([1, 2, 4, 8]);
+    const m = parseInt(multiplier, 10);
+    if (!allowed.has(m)) return;
+    this.screenBitrateMultiplier = m;
+    localStorage.setItem('haven_screen_bitrate_multiplier', String(m));
+
+    if (!this.isScreenSharing) return;
+    const res = this.screenResolution;
+    const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
+    for (const [, peer] of this.peers) {
+      this._applyScreenBitrate(peer.connection, maxBitrate);
+    }
+  }
+
   setScreenFrameRate(fps) {
     this.screenFrameRate = fps;  // 15 | 30 | 60
     localStorage.setItem('haven_screen_fps', fps);
@@ -1005,7 +1022,7 @@ class VoiceManager {
     }
 
     // Update bitrate cap on all peer senders
-    const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
+    const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
     for (const [, peer] of this.peers) {
       this._applyScreenBitrate(peer.connection, maxBitrate);
     }
@@ -1101,7 +1118,7 @@ class VoiceManager {
       });
       // Cap bitrate for this new peer
       const res = this.screenResolution;
-      const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
+      const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
       this._applyScreenBitrate(connection, maxBitrate);
     }
 
