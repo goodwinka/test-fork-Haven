@@ -1172,6 +1172,7 @@ function setupSocketHandlers(io, db) {
     const FLOOD_EXEMPT = new Set([
       'voice-offer', 'voice-answer', 'voice-ice-candidate',
       'screen-share-started', 'screen-share-stopped',
+      'request-screen-renegotiate',
       'voice-speaking', 'webcam-started', 'webcam-stopped',
       'stream-viewer-joined', 'stream-viewer-left',
       'visibility-change'
