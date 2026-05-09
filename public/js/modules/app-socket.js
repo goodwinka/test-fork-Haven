@@ -759,6 +759,8 @@ _setupSocketListeners() {
   });
 
   this.socket.on('online-users', (data) => {
+    this._onlineUsersByChannel = this._onlineUsersByChannel || {};
+    this._onlineUsersByChannel[data.channelCode] = data.users || [];
     if (data.channelCode === this.currentChannel) {
       // In 'all' mode the list includes offline members too; only count truly online users
       const trueOnlineCount = data.visibilityMode === 'all'
@@ -789,6 +791,13 @@ _setupSocketListeners() {
     const isInVoice = !!(this.voice && this.voice.inVoice && this.voice.currentChannel === data.channelCode);
     if ((isViewing || isInVoice) && localStorage.getItem('haven_hide_voice_panel') !== 'true') {
       this._renderVoiceUsers(data.users);
+    }
+    // Keep left-sidebar current users in sync even when count doesn't change.
+    this.voiceChannelUsers[data.channelCode] = data.users || [];
+    this._updateChannelVoiceIndicators();
+    if (this.currentChannel) {
+      // Refresh right sidebar user list too (it was also reported stale).
+      this.socket.emit('request-online-users', { code: this.currentChannel });
     }
     // Keep voice bar up to date
     if (isInVoice) {
@@ -1003,10 +1012,20 @@ _setupSocketListeners() {
   this.socket.on('stream-viewers-update', (data) => {
     this._streamInfo = data.streams || [];
     this._updateStreamViewerBadges();
-    // Always re-render voice users so the LIVE viewer count updates
-    // regardless of which text channel the user is viewing
-    if (this._lastVoiceUsers) {
-      this._renderVoiceUsers(this._lastVoiceUsers);
+
+    // Pull fresh voice users from server to keep ALL user surfaces in sync
+    // (voice panel, left sidebar channel mini-lists, viewer badges, statuses).
+    const targets = new Set();
+    if (data.channelCode) targets.add(data.channelCode);
+    if (this.currentChannel) targets.add(this.currentChannel);
+    if (this.voice && this.voice.inVoice && this.voice.currentChannel) {
+      targets.add(this.voice.currentChannel);
+    }
+    targets.forEach(code => this.socket.emit('request-voice-users', { code }));
+
+    // Always refresh the right sidebar list for the currently open channel.
+    if (this.currentChannel) {
+      this.socket.emit('request-online-users', { code: this.currentChannel });
     }
   });
 
