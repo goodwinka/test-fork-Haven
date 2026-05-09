@@ -718,13 +718,23 @@ _renderVoiceUsers(users) {
       e.stopPropagation();
       const userId = parseInt(badge.closest('.voice-user-item')?.dataset.userId);
       if (isNaN(userId)) return;
+      const container = document.getElementById('screen-share-container');
+      this._screenShareMinimized = false;
+      container?.classList.remove('stream-focus-mode');
+      document.getElementById('screen-share-indicator')?.remove();
+
       const tile = document.querySelector(`#screen-tile-${userId}[data-hidden="true"]`);
       if (tile) {
         this._showStreamTile(`screen-tile-${userId}`, userId);
-      } else {
-        // Force a watch request so the streamer renegotiates even after a broken peer connection.
-        this._forceWatchStream(userId);
+      } else if (container) {
+        // If we need renegotiation, keep the stream panel visible so the
+        // incoming stream appears immediately once tracks arrive.
+        container.style.display = 'flex';
       }
+
+      // Always force a watch request so the streamer renegotiates even
+      // when we restored an existing hidden tile.
+      this._forceWatchStream(userId);
     });
   });
 },
