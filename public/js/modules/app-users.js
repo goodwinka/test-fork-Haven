@@ -735,8 +735,14 @@ _renderVoiceUsers(users) {
 },
 
 _forceWatchStream(userId) {
-  if (!this.voice || !this.voice.inVoice || !this.voice.currentChannel || !this.socket) return;
-  this.socket.emit('stream-watch', { code: this.voice.currentChannel, sharerId: userId });
+  if (!this.voice || !this.voice.inVoice || !this.socket) return;
+  const code = this.voice.currentChannel || this.currentChannel;
+  if (!code) return;
+
+  // Force-reset watcher state before requesting watch again, so a stale
+  // previous subscription can't block renegotiation after closing/reopening.
+  this.socket.emit('stream-unwatch', { code, sharerId: userId });
+  this.socket.emit('stream-watch', { code, sharerId: userId });
 },
 
 _showVoiceUserMenu(anchorEl, userId, username) {
