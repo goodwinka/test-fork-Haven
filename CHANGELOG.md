@@ -11,6 +11,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Haven uses [Sema
 
 ---
 
+## [3.15.3] — 2026-05-08
+
+Further voice presence fix on top of 3.14.1 / 3.14.3 (#5347).
+
+### Fixed
+- **Voice list shows users who already left (#5347 follow-up).** Two server read paths (the connection-time voice snapshot and `get-voice-counts`) iterated the voice room map without pruning ghost entries from sockets that had disconnected in ways the cleanup missed (rejoin races, owner-mismatch on disconnect, dropped events). The result was the right-side voice panel showing the correct users while the left-side channel indicator still listed someone who left long ago. Both paths now prune first, broadcast the fresh roster (and `voice-user-left`) when they remove anyone so peer clients tear down dead RTCPeerConnections, and the disconnect handler also runs a prune pass on rooms it doesn't own so missed cleanups don't accumulate.
+
+---
+
 ## [3.15.2] — 2026-05-08
 
 Bug fixes for the media gallery, personas, and thread panel.

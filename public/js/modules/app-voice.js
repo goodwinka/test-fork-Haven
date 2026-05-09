@@ -17,10 +17,33 @@ async _joinVoice() {
   // voice.join() auto-leaves old channel if connected
   const success = await this.voice.join(this.currentChannel);
   if (success) {
+    const joinedCode = this.currentChannel;
+    const joinedUser = {
+      id: this.user.id,
+      username: this.user.displayName || this.user.username,
+      roleColor: this.user.roleColor || null,
+      isMuted: !!this.voice.isMuted,
+      isDeafened: !!this.voice.isDeafened
+    };
+
+    this._renderVoiceUsers([joinedUser]);
+    this.voiceCounts[joinedCode] = Math.max(1, this.voiceCounts[joinedCode] || 0);
+    this.voiceChannelUsers[joinedCode] = [
+      joinedUser,
+      ...(this.voiceChannelUsers[joinedCode] || []).filter(u => u.id !== joinedUser.id)
+    ];
+    this._updateChannelVoiceIndicators();
+
     this.notifications.playDirect('voice_join');
     this._updateVoiceButtons(true);
     this._updateVoiceStatus(true);
     this._updateVoiceBar();
+    // Server's broadcastVoiceUsers (fired on our voice-join) prunes stale
+    // entries and emits both voice-users-update + voice-count-update, so
+    // the right panel and sidebar reconcile authoritatively a tick later.
+    // Don't emit get-voice-counts here — it can race the broadcast and
+    // re-seed the sidebar with stale counts on older builds.
+    this.socket.emit('request-voice-users', { code: joinedCode });
     // Disable stream/music buttons if the channel has them off
     const _jvCh = this.channels.find(c => c.code === this.currentChannel);
     const _ssBtn = document.getElementById('screen-share-btn');

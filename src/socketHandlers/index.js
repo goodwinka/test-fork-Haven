@@ -370,13 +370,18 @@ function setupSocketHandlers(io, db) {
   }
 
   // ── pruneStaleVoiceUsers ────────────────────────────────
+  // Returns an array of removed { id, username } so callers can decide
+  // whether to broadcast a fresh roster. We do NOT broadcast from inside
+  // prune to avoid recursion with broadcastVoiceUsers.
   function pruneStaleVoiceUsers(code) {
     const room = voiceUsers.get(code);
-    if (!room) return;
+    if (!room) return [];
+    const removed = [];
     for (const [userId, entry] of room) {
       const sock = io.sockets.sockets.get(entry.socketId);
       if (!sock || !sock.connected) {
         room.delete(userId);
+        removed.push({ id: userId, username: entry.username });
         console.log(`[Voice] Pruned stale voice entry for user ${userId} (socket ${entry.socketId} gone)`);
       }
     }
@@ -398,6 +403,18 @@ function setupSocketHandlers(io, db) {
         }
       } catch { /* column may not exist yet */ }
     }
+    // Tell any remaining peers (and watchers of the text channel) that the
+    // pruned users are gone so they tear down dead RTCPeerConnections and
+    // clear stale sidebar entries. This is the safety net for ghost users
+    // that the disconnect/leave handlers somehow missed (rejoin races,
+    // owner-mismatch, dropped events, etc.). See #5347.
+    for (const u of removed) {
+      io.to(`voice:${code}`).to(`channel:${code}`).emit('voice-user-left', {
+        channelCode: code,
+        user: { id: u.id, username: u.username }
+      });
+    }
+    return removed;
   }
 
   // ── broadcastVoiceUsers ─────────────────────────────────
@@ -1109,13 +1126,25 @@ function setupSocketHandlers(io, db) {
       statusText: socket.user.statusText || ''
     });
 
-    // Send current voice counts for sidebar indicators
-    for (const [code, room] of voiceUsers) {
-      if (room.size > 0) {
+    // Send current voice counts for sidebar indicators.
+    // Prune stale entries first so the new client doesn't seed its sidebar
+    // with ghost users left behind by abrupt disconnects (#5347 follow-up).
+    // pruneStaleVoiceUsers may delete a code key entirely when the room
+    // empties, so snapshot the keys before iterating.
+    for (const code of Array.from(voiceUsers.keys())) {
+      const removed = pruneStaleVoiceUsers(code);
+      const room = voiceUsers.get(code);
+      if (room && room.size > 0) {
         const users = Array.from(room.values()).map(u => ({
           id: u.id, username: u.username, isMuted: u.isMuted || false, isDeafened: u.isDeafened || false
         }));
         socket.emit('voice-count-update', { code, count: room.size, users });
+        // If we just pruned ghosts, broadcast the fresh roster to everyone
+        // so existing clients also reconcile their sidebars.
+        if (removed.length) broadcastVoiceUsers(code);
+      } else {
+        // Room emptied (or was already empty after prune). Tell this socket.
+        socket.emit('voice-count-update', { code, count: 0, users: [] });
       }
     }
 
@@ -1304,10 +1333,20 @@ function setupSocketHandlers(io, db) {
         emitOnlineUsers(code);
       }
 
-      for (const [code, room] of voiceUsers) {
+      for (const code of Array.from(voiceUsers.keys())) {
+        const room = voiceUsers.get(code);
+        if (!room) continue;
         const voiceEntry = room.get(socket.user.id);
         if (voiceEntry && voiceEntry.socketId === socket.id) {
           handleVoiceLeave(socket, code, { softDisconnect: true });
+        } else {
+          // Owner-mismatch or no entry: still run a prune pass for this room
+          // so any other ghost entries (e.g. from a peer whose disconnect
+          // was missed) get cleaned up while we're already iterating.
+          // pruneStaleVoiceUsers itself broadcasts voice-user-left for the
+          // pruned ids and may delete the code key when the room empties.
+          const removed = pruneStaleVoiceUsers(code);
+          if (removed.length && voiceUsers.has(code)) broadcastVoiceUsers(code);
         }
       }
     });

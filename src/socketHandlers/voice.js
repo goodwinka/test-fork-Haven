@@ -5,6 +5,7 @@ const { isString, isInt } = require('./helpers');
 module.exports = function register(socket, ctx) {
   const { io, db, state, userHasPermission, getUserEffectiveLevel, getUserHighestRole,
           broadcastVoiceUsers, emitOnlineUsers, handleVoiceLeave, touchVoiceActivity,
+          pruneStaleVoiceUsers,
           getActiveMusicSyncState, getMusicQueuePayload } = ctx;
   const { channelUsers, voiceUsers, voiceLastActivity, activeMusic,
           activeScreenSharers, activeWebcamUsers, streamViewers, pendingTempDelete } = state;
@@ -654,10 +655,19 @@ module.exports = function register(socket, ctx) {
 
   // ── Voice counts / channel members ──────────────────────
   socket.on('get-voice-counts', () => {
-    for (const [code, room] of voiceUsers) {
-      if (room.size > 0) {
+    // Prune ghost entries first so the requesting client doesn't replace
+    // an already-clean sidebar with a stale snapshot. If pruning actually
+    // removed users, also rebroadcast the fresh roster so every other
+    // client reconciles too. (#5347 follow-up.)
+    for (const code of Array.from(voiceUsers.keys())) {
+      const removed = pruneStaleVoiceUsers(code);
+      const room = voiceUsers.get(code);
+      if (room && room.size > 0) {
         const users = Array.from(room.values()).map(u => ({ id: u.id, username: u.username, isMuted: u.isMuted || false, isDeafened: u.isDeafened || false }));
         socket.emit('voice-count-update', { code, count: room.size, users });
+        if (removed.length) broadcastVoiceUsers(code);
+      } else {
+        socket.emit('voice-count-update', { code, count: 0, users: [] });
       }
     }
   });
