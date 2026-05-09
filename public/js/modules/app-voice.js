@@ -1350,26 +1350,17 @@ _closeScreenShare() {
   const grid = document.getElementById('screen-share-grid');
   const tiles = grid ? grid.querySelectorAll('.screen-share-tile') : [];
 
-  // Mute all remote stream audio and fully remove tiles
+  // Hide all remote stream tiles so they can be restored from LIVE badges
+  // without requiring a full channel rejoin.
   tiles.forEach(t => {
     const uid = t.id.replace('screen-tile-', '');
-    this.voice.setStreamVolume(uid, 0);
-    const audioEl = document.getElementById(`voice-audio-screen-${uid}`);
-    if (audioEl) { audioEl.volume = 0; try { audioEl.pause(); } catch {} }
-    // Notify server we stopped watching
-    if (this.voice && this.voice.inVoice && uid !== String(this.user.id)) {
-      this.socket.emit('stream-unwatch', { code: this.voice.currentChannel, sharerId: parseInt(uid) || uid });
-    }
-    const vid = t.querySelector('video');
-    if (vid) vid.srcObject = null;
-    t.remove();
+    this._hideStreamTile(t, parseInt(uid) || uid, null, true);
   });
 
   container.style.display = 'none';
   container.classList.remove('stream-focus-mode');
   this._screenShareMinimized = false;
   this._removeScreenShareIndicator();
-  document.getElementById('hidden-streams-bar')?.remove();
 },
 
 // ── Screen Share Audio ──────────────────────────────
