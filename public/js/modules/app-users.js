@@ -726,12 +726,7 @@ _renderVoiceUsers(users) {
       const tile = document.querySelector(`#screen-tile-${userId}[data-hidden="true"]`);
       if (tile) {
         this._showStreamTile(`screen-tile-${userId}`, userId);
-      } else if (container) {
-        // If we need renegotiation, keep the stream panel visible so the
-        // incoming stream appears immediately once tracks arrive.
-        container.style.display = 'flex';
       }
-
       // Always force a watch request so the streamer renegotiates even
       // when we restored an existing hidden tile.
       this._forceWatchStream(userId);
