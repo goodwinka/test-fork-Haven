@@ -718,6 +718,11 @@ _renderVoiceUsers(users) {
       e.stopPropagation();
       const userId = parseInt(badge.closest('.voice-user-item')?.dataset.userId);
       if (isNaN(userId)) return;
+      const container = document.getElementById('screen-share-container');
+      this._screenShareMinimized = false;
+      container?.classList.remove('stream-focus-mode');
+      document.getElementById('screen-share-indicator')?.remove();
+
       const tile = document.querySelector(`#screen-tile-${userId}[data-hidden="true"]`);
       if (tile) {
         this._showStreamTile(`screen-tile-${userId}`, userId);
