@@ -1134,21 +1134,20 @@ function setupSocketHandlers(io, db) {
     // Send current voice counts for sidebar indicators.
     // Prune stale entries first so the new client doesn't seed its sidebar
     // with ghost users left behind by abrupt disconnects (#5347 follow-up).
-    // pruneStaleVoiceUsers may delete a code key entirely when the room
-    // empties, so snapshot the keys before iterating.
+    // pruneStaleVoiceUsers itself broadcasts voice-user-left for ghosts it
+    // removes, which is enough — we don't also call broadcastVoiceUsers
+    // here because that races the upcoming voice-rejoin broadcast and can
+    // re-seed every other client's sidebar with this socket's pre-rejoin
+    // view of the room. (#5347 v3.15.4.)
     for (const code of Array.from(voiceUsers.keys())) {
-      const removed = pruneStaleVoiceUsers(code);
+      pruneStaleVoiceUsers(code);
       const room = voiceUsers.get(code);
       if (room && room.size > 0) {
         const users = Array.from(room.values()).map(u => ({
           id: u.id, username: u.username, isMuted: u.isMuted || false, isDeafened: u.isDeafened || false
         }));
         socket.emit('voice-count-update', { code, count: room.size, users });
-        // If we just pruned ghosts, broadcast the fresh roster to everyone
-        // so existing clients also reconcile their sidebars.
-        if (removed.length) broadcastVoiceUsers(code);
       } else {
-        // Room emptied (or was already empty after prune). Tell this socket.
         socket.emit('voice-count-update', { code, count: 0, users: [] });
       }
     }

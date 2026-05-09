@@ -92,8 +92,22 @@ module.exports = function register(socket, ctx) {
         handleVoiceLeave(oldSocket, code);
         oldSocket.emit('voice-kicked', { channelCode: code, reason: 'Joined from another client' });
       } else {
-        // Stale entry — socket already disconnected; just clean up the map
+        // Stale entry — socket already disconnected. Drop the map entry AND
+        // broadcast voice-user-left to remaining peers so they tear down
+        // their dead RTCPeerConnection. Without this, peers keep the dead
+        // connection alive and apply the rejoiner's fresh offer on top of
+        // it, breaking audio for everyone. (#5347 v3.15.4 — mirrors the
+        // fix already in voice-rejoin's stale-entry path.)
         voiceUsers.get(code).delete(socket.user.id);
+        const remaining = voiceUsers.get(code);
+        if (remaining) {
+          for (const [, u] of remaining) {
+            io.to(u.socketId).emit('voice-user-left', {
+              channelCode: code,
+              user: { id: socket.user.id, username: socket.user.displayName }
+            });
+          }
+        }
       }
     }
 

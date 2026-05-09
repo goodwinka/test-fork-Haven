@@ -11,6 +11,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Haven uses [Sema
 
 ---
 
+## [3.15.4] — 2026-05-09
+
+Deeper voice presence fix on top of 3.15.3 (#5347). The previous patches cleaned up ghost entries but didn't address the actual reason peers couldn't see or hear each other after long idle periods.
+
+### Fixed
+- **Left sidebar and right voice panel could disagree (#5347 follow-up).** The two panels were driven by two unrelated client stores (`voice-users-update` only updated the right panel; `voice-count-update` only updated the sidebar). When one event arrived stale or out of order — typical in the rejoin / reconnect storm reported in the issue — the two views diverged and stayed diverged until a full reload. The right-panel handler now updates the sidebar stores as well, so both views are derived from the same authoritative event and cannot drift apart.
+- **Reconnect after socket drop stopped using `voice-rejoin` (#5347 follow-up).** When the socket dropped while in voice, `_softLeave` cleaned up local audio and cleared `inVoice` / `currentChannel` so the reconnect handler couldn't tell we had been in voice. It fell back to a delayed `setTimeout(1500)` auto-rejoin that emitted plain `voice-join` instead of `voice-rejoin`, and `voice-join`'s stale-entry branch did not broadcast `voice-user-left` to the rest of the room. Other peers held on to a dead `RTCPeerConnection` and the rejoiner's fresh offer was applied on top of it, so audio never re-established. `_softLeave` now stashes the channel intent in `_softLeftChannel`, the reconnect handler picks that up and immediately re-acquires the mic, and `voice-join`'s stale-entry branch now mirrors `voice-rejoin` and broadcasts `voice-user-left` so peers tear down dead connections cleanly.
+- **Connection-time voice snapshot was racing voice-rejoin's broadcast.** The 3.15.3 fix re-broadcast the room roster after pruning ghosts at connection time, but that broadcast went out before `voice-rejoin` had finished re-adding the rejoining user, so other clients briefly received a roster missing the rejoiner and the sidebar latched onto that view. The connection snapshot now only sends the count update to the connecting socket and lets `pruneStaleVoiceUsers` handle the per-ghost `voice-user-left` broadcast on its own.
+
+---
+
 ## [3.15.3] — 2026-05-08
 
 Further voice presence fix on top of 3.14.1 / 3.14.3 (#5347).

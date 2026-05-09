@@ -632,6 +632,14 @@ class VoiceManager {
       this.localStream = null;
     }
 
+    // Remember the channel we were in so the reconnect handler can use
+    // voice-rejoin (which broadcasts voice-user-left to peers, forcing them
+    // to tear down stale RTCPeerConnections) instead of the slower
+    // setTimeout(1500) auto-rejoin path that fires plain voice-join. The
+    // auto-rejoin path leaves other peers with dead WebRTC sessions and is
+    // the cause of the "rejoined but can't hear anyone" pattern in #5347.
+    this._softLeftChannel = this.currentChannel;
+
     this.currentChannel = null;
     this.inVoice = false;
     this.isMuted = false;

@@ -114,6 +114,28 @@ _setupSocketListeners() {
       this.socket.emit('voice-rejoin', { code: this.voice.currentChannel });
       if (this.voice.isMuted) this.socket.emit('voice-mute-state', { code: this.voice.currentChannel, muted: true });
       if (this.voice.isDeafened) this.socket.emit('voice-deafen-state', { code: this.voice.currentChannel, deafened: true });
+    } else if (this.voice && this.voice._softLeftChannel) {
+      // (#5347 v3.15.4) The socket dropped while we were in voice; _softLeave
+      // tore down local audio but kept the channel intent. Re-init the mic
+      // and announce ourselves via voice-rejoin so peers tear down their
+      // stale RTCPeerConnections via voice-user-left and we get fresh ones.
+      // This is the proper rejoin path — the localStorage setTimeout(1500)
+      // fallback below uses voice.join which doesn't do that, leaving peers
+      // with dead audio paths even after "rejoin".
+      const rejoinChannel = this.voice._softLeftChannel;
+      this.voice._softLeftChannel = null;
+      (async () => {
+        try {
+          const ok = await this.voice.join(rejoinChannel);
+          if (ok) {
+            this._updateVoiceButtons(true);
+            this._updateVoiceStatus(true);
+            this._updateVoiceBar();
+          }
+        } catch (e) {
+          console.warn('[Voice] reconnect rejoin failed:', e);
+        }
+      })();
     } else {
       // Check localStorage for saved voice channel (persists across page refreshes / server restarts)
       try {
@@ -778,25 +800,40 @@ _setupSocketListeners() {
   this.socket.on('voice-users-update', (data) => {
     // (#5347 follow-up) Re-render the voice participant list whenever the
     // user is either viewing the channel OR currently in voice on it.
-    // Previously the render only fired when `data.channelCode` matched
-    // `this.currentChannel` (the *text* channel being viewed). If you were
-    // talking on channel B but had clicked over to read text channel A,
-    // every subsequent join/leave on B was discarded - so users in the
-    // call literally couldn't see anyone who joined after them until they
-    // hard-refreshed the client. Now we also render when we're actually
-    // in voice on that channel, regardless of which text channel is open.
     const isViewing = data.channelCode === this.currentChannel;
     const isInVoice = !!(this.voice && this.voice.inVoice && this.voice.currentChannel === data.channelCode);
     if ((isViewing || isInVoice) && localStorage.getItem('haven_hide_voice_panel') !== 'true') {
       this._renderVoiceUsers(data.users);
     }
+    // (#5347 v3.15.4) Keep the left sidebar in sync with the right panel.
+    // Previously the right panel was driven by voice-users-update and the
+    // left sidebar by voice-count-update, and the two could drift if one
+    // event arrived stale or out of order (the user saw both users on the
+    // right but only themselves on the left). Both stores are now updated
+    // from this single authoritative event so they cannot disagree.
+    const usersForSidebar = (data.users || []).map(u => ({
+      id: u.id, username: u.username,
+      isMuted: !!u.isMuted, isDeafened: !!u.isDeafened
+    }));
+    if (usersForSidebar.length > 0) {
+      this.voiceCounts[data.channelCode] = usersForSidebar.length;
+      this.voiceChannelUsers[data.channelCode] = usersForSidebar;
+    } else {
+      delete this.voiceCounts[data.channelCode];
+      delete this.voiceChannelUsers[data.channelCode];
+    }
+    this._updateChannelVoiceIndicators();
     // Keep voice bar up to date
     if (isInVoice) {
       this._updateVoiceBar();
     }
   });
 
-  // Lightweight sidebar voice count — fires for every voice join/leave
+  // Lightweight sidebar voice count — fires for every voice join/leave.
+  // Kept for cross-channel notifications (the user gets count updates for
+  // channels they're not currently viewing) and as a safety net if a
+  // voice-users-update is dropped. The voice-users-update handler is the
+  // primary source of truth.
   this.socket.on('voice-count-update', (data) => {
     if (data.count > 0) {
       this.voiceCounts[data.code] = data.count;
