@@ -652,6 +652,7 @@ _renderVoiceUsers(users) {
       const myStream = streams.find(s => String(s.sharerId) === String(u.id));
       const viewerCount = myStream ? myStream.viewers.length : 0;
       streamBadge = `<span class="voice-stream-badge live" title="${viewerCount ? t(viewerCount === 1 ? 'users.streaming_viewers_one' : 'users.streaming_viewers_other', { count: viewerCount }) : t('users.streaming_no_viewers')}">🔴 ${t('users.streaming_live')}${viewerCount ? ' · ' + viewerCount : ''}</span>`;
+      streamBadge += `<button class="voice-stream-badge watching voice-stream-watch-btn" type="button" title="${t('users.voice_menu.watch_stream')}">🖥 ${t('users.voice_menu.watch_stream')}</button>`;
     }
     if (hasWebcam) {
       streamBadge += `<span class="voice-stream-badge webcam" title="Camera on">📹</span>`;
@@ -711,15 +712,30 @@ _renderVoiceUsers(users) {
     });
   });
 
-  // Bind LIVE badges — clicking restores a hidden stream tile
-  el.querySelectorAll('.voice-stream-badge.live').forEach(badge => {
-    badge.style.cursor = 'pointer';
-    badge.addEventListener('click', (e) => {
+  const restoreHiddenStreamTile = (originEl) => {
+    const userId = parseInt(originEl.closest('.voice-user-item')?.dataset.userId);
+    if (isNaN(userId)) return;
+    const tileId = `screen-tile-${userId}`;
+    const hiddenTile = document.querySelector(`#${tileId}[data-hidden="true"]`);
+    if (hiddenTile) {
+      this._showStreamTile(tileId, userId);
+      return;
+    }
+
+    // If the tile is missing entirely, the stream viewer connection likely dropped.
+    // Re-send watch intent so server/peer can restore the media connection.
+    if (this.voice && this.voice.inVoice && this.voice.currentChannel && userId !== this.user.id) {
+      this.socket.emit('stream-watch', { code: this.voice.currentChannel, sharerId: userId });
+      this._showToast(t('users.voice_menu.watch_stream'), 'info');
+    }
+  };
+
+  // Bind LIVE badges and watch buttons — clicking restores a hidden stream tile
+  el.querySelectorAll('.voice-stream-badge.live, .voice-stream-watch-btn').forEach(control => {
+    control.style.cursor = 'pointer';
+    control.addEventListener('click', (e) => {
       e.stopPropagation();
-      const userId = parseInt(badge.closest('.voice-user-item')?.dataset.userId);
-      if (isNaN(userId)) return;
-      const tile = document.querySelector(`#screen-tile-${userId}[data-hidden="true"]`);
-      if (tile) this._showStreamTile(`screen-tile-${userId}`, userId);
+      restoreHiddenStreamTile(control);
     });
   });
 },

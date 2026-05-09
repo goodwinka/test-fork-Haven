@@ -334,6 +334,7 @@
   color: #5ab4ff;
   font-size: 11px;
 }
+
 @keyframes live-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
