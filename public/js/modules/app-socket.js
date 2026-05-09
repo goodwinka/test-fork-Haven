@@ -790,6 +790,9 @@ _setupSocketListeners() {
     if ((isViewing || isInVoice) && localStorage.getItem('haven_hide_voice_panel') !== 'true') {
       this._renderVoiceUsers(data.users);
     }
+    // Keep left-sidebar current users in sync even when count doesn't change.
+    this.voiceChannelUsers[data.channelCode] = data.users || [];
+    this._updateChannelVoiceIndicators();
     // Keep voice bar up to date
     if (isInVoice) {
       this._updateVoiceBar();

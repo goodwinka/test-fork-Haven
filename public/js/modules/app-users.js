@@ -720,6 +720,7 @@ _renderVoiceUsers(users) {
       if (isNaN(userId)) return;
       const tile = document.querySelector(`#screen-tile-${userId}[data-hidden="true"]`);
       if (tile) this._showStreamTile(`screen-tile-${userId}`, userId);
+      else if (this.voice && this.voice.inVoice) this.socket.emit('request-stream-renegotiate', { code: this.voice.currentChannel, sharerId: userId });
     });
   });
 },
@@ -746,7 +747,7 @@ _showVoiceUserMenu(anchorEl, userId, username) {
       <span class="voice-user-vol-value">${savedVol}%</span>
     </div>
     <div class="voice-user-menu-actions">
-      ${hiddenTile ? `<button class="voice-user-menu-action" data-action="watch-stream">🖥 ${t('users.voice_menu.watch_stream')}</button>` : ''}
+      ${isStreaming ? `<button class="voice-user-menu-action" data-action="watch-stream">🖥 ${t('users.voice_menu.watch_stream')}</button>` : ''}
       <button class="voice-user-menu-action" data-action="mute-user">${isMuted ? `🔊 ${t('users.voice_menu.unmute')}` : `🔇 ${t('users.voice_menu.mute')}`}</button>
       <button class="voice-user-menu-action ${isDeafened ? 'active' : ''}" data-action="deafen-user">${isDeafened ? `🔊 ${t('users.voice_menu.undeafen')}` : `🔇 ${t('users.voice_menu.deafen')}`}</button>
       ${canKick ? `<button class="voice-user-menu-action danger" data-action="voice-kick" title="${t('users.voice_menu.voice_kick_title')}">🚪 ${t('users.voice_menu.voice_kick')}</button>` : ''}
@@ -785,8 +786,14 @@ _showVoiceUserMenu(anchorEl, userId, username) {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (btn.dataset.action === 'watch-stream') {
-        // Restore the hidden stream tile
-        this._showStreamTile(`screen-tile-${userId}`, userId);
+        // Restore hidden tile if present; otherwise ask streamer to renegotiate.
+        const tile = document.querySelector(`#screen-tile-${userId}[data-hidden="true"]`);
+        if (tile) {
+          this._showStreamTile(`screen-tile-${userId}`, userId);
+        } else if (this.voice && this.voice.inVoice) {
+          this.socket.emit('request-stream-renegotiate', { code: this.voice.currentChannel, sharerId: userId });
+          this._showToast(t('toasts.requesting_stream_reconnect') || 'Requesting stream reconnect…', 'info');
+        }
         this._closeVoiceUserMenu();
       } else if (btn.dataset.action === 'mute-user') {
         // Mute: toggle their volume to 0 so YOU can't hear THEM
