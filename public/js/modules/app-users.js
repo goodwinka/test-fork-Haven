@@ -721,10 +721,10 @@ _renderVoiceUsers(users) {
       const tile = document.querySelector(`#screen-tile-${userId}[data-hidden="true"]`);
       if (tile) {
         this._showStreamTile(`screen-tile-${userId}`, userId);
-      } else {
-        // Force a watch request so the streamer renegotiates even after a broken peer connection.
-        this._forceWatchStream(userId);
       }
+      // Always force a watch request so the streamer renegotiates even
+      // when we restored an existing hidden tile.
+      this._forceWatchStream(userId);
     });
   });
 },
