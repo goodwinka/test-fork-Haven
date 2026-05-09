@@ -795,10 +795,6 @@ _setupSocketListeners() {
     // Keep left-sidebar current users in sync even when count doesn't change.
     this.voiceChannelUsers[data.channelCode] = data.users || [];
     this._updateChannelVoiceIndicators();
-    if (this.currentChannel) {
-      // Refresh right sidebar user list too (it was also reported stale).
-      this.socket.emit('request-online-users', { code: this.currentChannel });
-    }
     // Keep voice bar up to date
     if (isInVoice) {
       this._updateVoiceBar();
