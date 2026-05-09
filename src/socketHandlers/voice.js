@@ -430,20 +430,6 @@ module.exports = function register(socket, ctx) {
     broadcastStreamInfo(data.code);
   });
 
-
-  socket.on('request-stream-renegotiate', (data) => {
-    if (!data || typeof data !== 'object') return;
-    if (!isString(data.code, 8, 8) || !isInt(data.sharerId)) return;
-    const voiceRoom = voiceUsers.get(data.code);
-    if (!voiceRoom || !voiceRoom.has(socket.user.id)) return;
-    const sharer = voiceRoom.get(data.sharerId);
-    if (!sharer) return;
-    io.to(sharer.socketId).emit('renegotiate-screen', {
-      targetUserId: socket.user.id,
-      channelCode: data.code
-    });
-  });
-
   // ── Voice state ─────────────────────────────────────────
   socket.on('request-online-users', (data) => {
     if (!data || typeof data !== 'object') return;
