@@ -989,11 +989,7 @@ class VoiceManager {
     localStorage.setItem('haven_screen_bitrate_multiplier', String(m));
 
     if (!this.isScreenSharing) return;
-    const res = this.screenResolution;
-    const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
-    for (const [, peer] of this.peers) {
-      this._applyScreenBitrate(peer.connection, maxBitrate);
-    }
+    this._reapplyScreenEncodingProfile();
   }
 
   setScreenFrameRate(fps) {
@@ -1029,7 +1025,13 @@ class VoiceManager {
       console.warn('applyConstraints failed (browser may not support live constraint changes):', e);
     }
 
-    // Update bitrate cap on all peer senders
+    // Reapply full sender encoding profile for all active peers so
+    // quality changes from the UI take effect immediately.
+    this._reapplyScreenEncodingProfile();
+  }
+
+  _reapplyScreenEncodingProfile() {
+    const res = this.screenResolution;
     const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
     for (const [, peer] of this.peers) {
       this._applyScreenBitrate(peer.connection, maxBitrate);
@@ -1051,6 +1053,19 @@ class VoiceManager {
             params.encodings = [{}];
           }
           params.encodings[0].maxBitrate = maxBitrate;
+          // Prefer quality under network pressure: keep bitrate near the cap.
+          // Some browsers ignore minBitrate, but where supported this prevents
+          // aggressive compression swings for screen text/detail.
+          params.encodings[0].minBitrate = Math.floor(maxBitrate * 0.8);
+          // Keep source resolution (disable automatic spatial downscale).
+          params.encodings[0].scaleResolutionDownBy = 1;
+          // Spend bitrate predictably according to selected screen-share FPS profile.
+          params.encodings[0].maxFramerate = this.screenFrameRate;
+          // Optional transport hints; ignored by browsers that don't support them.
+          params.encodings[0].priority = 'high';
+          params.encodings[0].networkPriority = 'high';
+          // Prefer preserving resolution during adaptation over smearing details.
+          params.degradationPreference = 'maintain-resolution';
           sender.setParameters(params).catch(() => {});
         }
       }
