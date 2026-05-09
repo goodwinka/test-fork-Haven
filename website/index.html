@@ -1415,12 +1415,12 @@
       </div>
 
       <div class="download-card fade-in">
-        <h2>&#x2B21; Haven Server &mdash; v3.15.1</h2>
+        <h2>&#x2B21; Haven Server &mdash; v3.15.5</h2>
         <p class="download-version">Latest stable release &middot; Windows, macOS &amp; Linux &middot; ~5 MB</p>
 
         <div class="download-btn-group">
-          <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.1.zip" class="btn btn-primary download-main">
-            <span class="icon">&#x2B07;</span> Download v3.15.1 (.zip)
+          <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.5.zip" class="btn btn-primary download-main">
+            <span class="icon">&#x2B07;</span> Download v3.15.5 (.zip)
           </a>
           <div class="download-alt-links">
             <a href="https://github.com/ancsemi/Haven" target="_blank">&#9965; View on GitHub</a>
@@ -1437,7 +1437,23 @@
           <div class="version-list">
             <div class="version-list-inner">
               <div class="version-item">
-                <div><span class="v-name">v3.15.1</span><span class="v-tag latest">Latest</span> &mdash; Polish pass on the Channel Media Gallery + Personas: persona prefix changed to <code>::Name your message</code> with autocomplete, <code>@PersonaName</code> mentions now resolve and ping the owner, fixed the bug where consecutive messages from different personas all stacked under the first persona's header, jump-to-message button on photo/video gallery tiles, video tiles open in an inline player instead of silently closing the gallery, image lightbox now sits above the gallery modal, top-bar header buttons follow the Colorful/Monochrome icon setting</div>
+                <div><span class="v-name">v3.15.5</span><span class="v-tag latest">Latest</span> &mdash; Screen-share reliability overhaul: fixed silent <code>_renegotiate</code> throw when signaling state wasn't stable (caused audio-but-no-video), late-joiner screen tracks skipped if webcam was also on, <code>screen-share-started</code> was emitting after renegotiation instead of before, and added a recovery handshake so receivers automatically ask the sharer to re-offer if no video appears within ~3s</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.5.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.4</span> &mdash; Voice presence drift fix: sidebar and right voice panel now always in sync, reconnect after socket drop now correctly uses the rejoin path instead of a delayed plain join that left peers with dead connections</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.4.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.3</span> &mdash; Ghost voice entries pruned on connection snapshot and get-voice-counts so users who already left no longer show in the sidebar or voice panel</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.3.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.2</span> &mdash; Thread panel z-index fix, persona autocomplete hidden in DMs and threads, persona tooltip showing raw i18n key, double close button in media gallery, gallery button hidden in DMs, OpenSSL not recognized on Windows bat startup</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.2.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.1</span> &mdash; Polish pass on the Channel Media Gallery + Personas: persona prefix changed to <code>::Name your message</code> with autocomplete, <code>@PersonaName</code> mentions now resolve and ping the owner, fixed the bug where consecutive messages from different personas all stacked under the first persona's header, jump-to-message button on photo/video gallery tiles, video tiles open in an inline player instead of silently closing the gallery, image lightbox now sits above the gallery modal, top-bar header buttons follow the Colorful/Monochrome icon setting</div>
                 <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.1.zip">Download &rarr;</a>
               </div>
               <div class="version-item">
