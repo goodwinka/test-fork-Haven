@@ -744,8 +744,9 @@ _showVoiceUserMenu(anchorEl, userId, username) {
   const canKick = this._hasPerm('kick_user');
   // Check if user is streaming and has a hidden tile we can restore
   const streams = this._streamInfo || [];
-  const isStreaming = streams.some(s => String(s.sharerId) === String(userId));
-  const hiddenTile = isStreaming ? document.querySelector(`#screen-tile-${userId}[data-hidden="true"]`) : null;
+  const isStreamingByPayload = streams.some(s => String(s.sharerId) === String(userId));
+  const isStreamingBySignal = !!(this.voice && this.voice.screenSharers && this.voice.screenSharers.has(userId));
+  const isStreaming = isStreamingByPayload || isStreamingBySignal;
   const menu = document.createElement('div');
   menu.className = 'voice-user-menu';
   menu.innerHTML = `
