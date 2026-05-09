@@ -11,8 +11,38 @@ module.exports = function register(socket, ctx) {
     handleVoiceLeave, broadcastVoiceUsers, generateChannelCode,
     applyRoleChannelAccess, logAudit, fireWebhookEvent
   } = ctx;
-  const { channelUsers, voiceUsers, activeMusic, musicQueues } = state;
+  const { channelUsers, voiceUsers, activeMusic, musicQueues, activeScreenSharers, streamViewers } = state;
   const _audit = (typeof logAudit === 'function') ? logAudit : () => {};
+
+
+  function emitStreamInfoSnapshot(code) {
+    const voiceRoom = voiceUsers.get(code);
+    const sharers = activeScreenSharers.get(code);
+    const streams = [];
+    if (sharers) {
+      for (const sharerId of sharers) {
+        const sharerInfo = voiceRoom ? voiceRoom.get(sharerId) : null;
+        const viewers = streamViewers.get(`${code}:${sharerId}`);
+        const viewerList = [];
+        if (viewers && voiceRoom) {
+          for (const vid of viewers) {
+            const vInfo = voiceRoom.get(vid);
+            if (vInfo) viewerList.push({ id: vid, username: vInfo.username });
+          }
+        }
+        streams.push({
+          sharerId,
+          sharerName: sharerInfo ? sharerInfo.username : 'Unknown',
+          viewers: viewerList,
+          userId: sharerId,
+          username: sharerInfo ? sharerInfo.username : 'Unknown',
+          type: 'screen',
+          viewerIds: viewers ? Array.from(viewers) : []
+        });
+      }
+    }
+    socket.emit('stream-info', { channelCode: code, streams });
+  }
 
   // ── Get user's channels ─────────────────────────────────
   socket.on('get-channels', () => {
@@ -436,6 +466,7 @@ module.exports = function register(socket, ctx) {
     });
 
     emitOnlineUsers(code);
+    emitStreamInfoSnapshot(code);
   });
 
   // ── Delete channel ──────────────────────────────────────
