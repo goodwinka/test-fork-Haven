@@ -1217,9 +1217,18 @@ _showScreenShareIndicator(count) {
         grid.querySelectorAll('.screen-share-tile[data-hidden="true"]').forEach(t => {
           t.style.display = '';
           delete t.dataset.hidden;
+
+          // Re-play video after being hidden; some browsers pause render on display:none.
+          const vid = t.querySelector('video');
+          if (vid && vid.srcObject) vid.play().catch(() => {});
+
+          const uid = t.id.replace('screen-tile-', '');
           if (t.dataset.muted === 'true') {
             delete t.dataset.muted;
-            const uid = t.id.replace('screen-tile-', '');
+            // Resume the paused audio element first, then restore gain volume.
+            const audioEl = document.getElementById(`voice-audio-screen-${uid}`);
+            if (audioEl && audioEl.paused) { try { audioEl.play(); } catch {} }
+
             const volSlider = t.querySelector('.stream-vol-slider');
             const vol = volSlider ? parseInt(volSlider.value) / 100 : 1;
             this.voice.setStreamVolume(uid, vol);
