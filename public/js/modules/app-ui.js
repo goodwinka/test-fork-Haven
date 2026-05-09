@@ -1225,6 +1225,7 @@ _setupUI() {
   // ── Screen share quality dropdowns ──
   const screenResSelect = document.getElementById('screen-res-select');
   const screenFpsSelect = document.getElementById('screen-fps-select');
+  const screenBitrateMultiplierSelect = document.getElementById('screen-bitrate-multiplier-select');
   if (screenResSelect) {
     // Restore saved value (0 = "source")
     const savedRes = localStorage.getItem('haven_screen_res') || '1080';
@@ -1239,6 +1240,14 @@ _setupUI() {
     screenFpsSelect.value = savedFps;
     screenFpsSelect.addEventListener('change', (e) => {
       this.voice.setScreenFrameRate(parseInt(e.target.value, 10));
+    });
+  }
+
+  if (screenBitrateMultiplierSelect) {
+    const savedMultiplier = localStorage.getItem('haven_screen_bitrate_multiplier') || '1';
+    screenBitrateMultiplierSelect.value = savedMultiplier;
+    screenBitrateMultiplierSelect.addEventListener('change', (e) => {
+      this.voice.setScreenBitrateMultiplier(parseInt(e.target.value, 10));
     });
   }
 
