@@ -639,17 +639,17 @@ _renderVoiceUsers(users) {
     // for them.  The server payload is only refreshed at certain hooks and
     // could lag, so falling back on the live signaling avoids the bug
     // where the icon didn't appear until the local user also shared.
-    const isStreamingByPayload = streams.some(s => s.sharerId === u.id);
+    const isStreamingByPayload = streams.some(s => String(s.sharerId) === String(u.id));
     const isStreamingBySignal = !!(this.voice && this.voice.screenSharers && this.voice.screenSharers.has(u.id));
     const isStreaming = isStreamingByPayload || isStreamingBySignal;
-    const watchingStreams = streams.filter(s => s.viewers.some(v => v.id === u.id));
+    const watchingStreams = streams.filter(s => s.viewers.some(v => String(v.id) === String(u.id)));
     const isWatching = watchingStreams.length > 0;
     // Webcam indicator
     const hasWebcam = this.voice && this.voice.webcamUsers && this.voice.webcamUsers.has(u.id);
 
     let streamBadge = '';
     if (isStreaming) {
-      const myStream = streams.find(s => s.sharerId === u.id);
+      const myStream = streams.find(s => String(s.sharerId) === String(u.id));
       const viewerCount = myStream ? myStream.viewers.length : 0;
       streamBadge = `<span class="voice-stream-badge live" title="${viewerCount ? t(viewerCount === 1 ? 'users.streaming_viewers_one' : 'users.streaming_viewers_other', { count: viewerCount }) : t('users.streaming_no_viewers')}">🔴 ${t('users.streaming_live')}${viewerCount ? ' · ' + viewerCount : ''}</span>`;
     }
@@ -734,7 +734,7 @@ _showVoiceUserMenu(anchorEl, userId, username) {
   const canKick = this._hasPerm('kick_user');
   // Check if user is streaming and has a hidden tile we can restore
   const streams = this._streamInfo || [];
-  const isStreaming = streams.some(s => s.sharerId === userId);
+  const isStreaming = streams.some(s => String(s.sharerId) === String(userId));
   const hiddenTile = isStreaming ? document.querySelector(`#screen-tile-${userId}[data-hidden="true"]`) : null;
   const menu = document.createElement('div');
   menu.className = 'voice-user-menu';
