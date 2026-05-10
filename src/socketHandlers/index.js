@@ -33,7 +33,7 @@ function setupSocketHandlers(io, db) {
   // ── Permission helpers (shared across all connections) ───
   const {
     getChannelRoleChain, getUserEffectiveLevel, getPermissionThresholds,
-    userHasPermission, getUserPermissions, getUserRoles, getUserHighestRole
+    userHasPermission, getUserPermissions, getUserRoles, getUserHighestRole, getUserAllRoles
   } = createPermissions(db);
 
   // ── Shared state Maps ───────────────────────────────────
@@ -1270,7 +1270,7 @@ function setupSocketHandlers(io, db) {
       io, db, state,
       // Permissions
       getChannelRoleChain, getUserEffectiveLevel, getPermissionThresholds,
-      userHasPermission, getUserPermissions, getUserRoles, getUserHighestRole,
+      userHasPermission, getUserPermissions, getUserRoles, getUserHighestRole, getUserAllRoles,
       // Broadcast helpers
       broadcastChannelLists, broadcastVoiceUsers, emitOnlineUsers,
       getEnrichedChannels, handleVoiceLeave, pruneStaleVoiceUsers,

@@ -859,7 +859,7 @@ _createMessageEl(msg, prevMsg) {
         ${replyHtml}
         <div class="message-header">
           ${msgRoleIconBefore}
-          <span class="message-author" style="color:${authorColor}"${this._nicknames[msg.user_id] ? ` title="${this._escapeHtml(msg.username)}"` : ''}>${this._escapeHtml(this._getNickname(msg.user_id, msg.username))}</span>
+          <span class="message-author" style="color:${authorColor}"${!msg.persona_id && this._nicknames[msg.user_id] ? ` title="${this._escapeHtml(msg.username)}"` : ''}>${this._escapeHtml(msg.persona_id ? msg.username : this._getNickname(msg.user_id, msg.username))}</span>
           ${msgRoleIconAfter}
           ${botBadge}
           ${personaBadge}

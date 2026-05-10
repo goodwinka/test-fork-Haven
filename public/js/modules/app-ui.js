@@ -5510,6 +5510,10 @@ _openVideoLightbox(src) {
 // type their persona's name normally in chat without accidentally routing
 // the message through the persona.
 _checkPersonaTrigger(inputEl) {
+  // Personas are not supported in DMs — suppress the dropdown if the current
+  // channel is a DM (covers fullscreen DM view which reuses #message-input).
+  const _curCh = this.currentChannel && this.channels && this.channels.find(c => c.code === this.currentChannel);
+  if (_curCh && _curCh.is_dm) { this._hidePersonaDropdown(); return; }
   const input = inputEl || document.getElementById('message-input');
   if (!input) return;
   this._personaInput = input;

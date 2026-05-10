@@ -1415,12 +1415,12 @@
       </div>
 
       <div class="download-card fade-in">
-        <h2>&#x2B21; Haven Server &mdash; v3.15.5</h2>
+        <h2>&#x2B21; Haven Server &mdash; v3.15.7</h2>
         <p class="download-version">Latest stable release &middot; Windows, macOS &amp; Linux &middot; ~5 MB</p>
 
         <div class="download-btn-group">
-          <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.5.zip" class="btn btn-primary download-main">
-            <span class="icon">&#x2B07;</span> Download v3.15.5 (.zip)
+          <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.7.zip" class="btn btn-primary download-main">
+            <span class="icon">&#x2B07;</span> Download v3.15.7 (.zip)
           </a>
           <div class="download-alt-links">
             <a href="https://github.com/ancsemi/Haven" target="_blank">&#9965; View on GitHub</a>
@@ -1437,7 +1437,15 @@
           <div class="version-list">
             <div class="version-list-inner">
               <div class="version-item">
-                <div><span class="v-name">v3.15.5</span><span class="v-tag latest">Latest</span> &mdash; Screen-share reliability overhaul: fixed silent <code>_renegotiate</code> throw when signaling state wasn't stable (caused audio-but-no-video), late-joiner screen tracks skipped if webcam was also on, <code>screen-share-started</code> was emitting after renegotiation instead of before, and added a recovery handshake so receivers automatically ask the sharer to re-offer if no video appears within ~3s</div>
+                <div><span class="v-name">v3.15.7</span><span class="v-tag latest">Latest</span> &mdash; Critical hotfix: <code>getUserAllRoles</code> was missing from the server's permission destructure, causing every voice user broadcast to throw a ReferenceError silently. Voice lists never updated after joins/leaves/mutes. Also fixed the saved server list being rejected with a 500 once it grew past ~50 servers</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.7.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.6</span> &mdash; Persona <code>::</code> autocomplete no longer appears in fullscreen DM view, and nicknames no longer override persona display names on messages</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.6.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.5</span> &mdash; Screen-share reliability overhaul: fixed silent <code>_renegotiate</code> throw when signaling state wasn't stable (caused audio-but-no-video), late-joiner screen tracks skipped if webcam was also on, <code>screen-share-started</code> was emitting after renegotiation instead of before, and added a recovery handshake so receivers automatically ask the sharer to re-offer if no video appears within ~3s</div>
                 <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.5.zip">Download &rarr;</a>
               </div>
               <div class="version-item">
