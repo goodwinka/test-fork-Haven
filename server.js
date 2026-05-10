@@ -151,8 +151,13 @@ app.use((req, res, next) => {
 app.disable('x-powered-by');
 
 // ── Body Parsing with size limits ────────────────────────
-app.use(express.json({ limit: '16kb' }));  // no reason for large JSON bodies
-app.use(express.urlencoded({ extended: false, limit: '16kb' }));
+// Global limit bumped to 128kb so legit large-but-bounded payloads like the
+// per-user saved server list (PUT /api/auth/user-servers, ~40kb at 100+
+// servers) aren't rejected by the global parser before per-route parsers
+// can apply their own limits. Individual routes still set tighter limits
+// where appropriate. (#5347 v3.15.7)
+app.use(express.json({ limit: '128kb' }));
+app.use(express.urlencoded({ extended: false, limit: '128kb' }));
 
 // ── Static files with caching ────────────────────────────
 app.use(express.static(path.join(__dirname, 'public'), {

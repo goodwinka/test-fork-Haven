@@ -11,6 +11,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Haven uses [Sema
 
 ---
 
+## [3.15.7] — 2026-05-09
+
+Hotfix on top of 3.15.4-3.15.6 (#5347). The voice presence work in 3.15.4 added a `getUserAllRoles` lookup inside `broadcastVoiceUsers` but the helper was never destructured from `createPermissions(db)`, so every voice broadcast (join, leave, mute, etc.) was throwing `ReferenceError: getUserAllRoles is not defined`. The error happened inside an async socket handler, so the server stayed up but the broadcast never completed: clients kept showing whoever was last successfully broadcast, ghost users persisted after leaves, and rejoiners didn't appear in the roster until everyone left and rejoined. This is the actual cause of the long-standing "voice list disagrees with reality" symptom, not the things 3.15.3-3.15.5 patched around it.
+
+### Fixed
+- **`ReferenceError: getUserAllRoles is not defined` on every voice broadcast (#5347).** Added the missing destructure in `setupSocketHandlers` and re-exported it on the shared ctx so domain modules can use it too. Voice user broadcasts now actually complete.
+- **Saved server list (`PUT /api/auth/user-servers`) rejected as `PayloadTooLargeError` once the list got past ~50 servers.** The per-route `express.json({ limit: '96kb' })` in `auth.js` was being preempted by the global 16kb parser registered in `server.js`. Bumped the global json/urlencoded limit to 128kb. Individual routes still set their own tighter limits where appropriate.
+
+---
+
 ## [3.15.6] — 2026-05-09
 
 Follow-up fixes for personas (#5353).
