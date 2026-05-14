@@ -68,6 +68,12 @@ async _joinVoice() {
 },
 
 _leaveVoice() {
+  // Capture the channel BEFORE voice.leave() nulls currentChannel so we
+  // can immediately clear the right voice panel and sidebar count for it.
+  // Don't wait for the server's voice-users-update broadcast — if we left
+  // the voice room before the broadcast fires, it may not reach us, and
+  // the panel would stay stuck showing us as a participant (#5347).
+  const leftCode = this.voice && this.voice.currentChannel;
   this.voice.leave();
   this._mutedByDeafen = false;
   this.notifications.playDirect('voice_leave');
@@ -75,6 +81,17 @@ _leaveVoice() {
   this._updateVoiceStatus(false);
   this._updateVoiceBar();
   this._hideMusicPanel();
+  // Optimistic local clear — mirrors the optimistic seed done in _joinVoice.
+  if (leftCode) {
+    delete this.voiceCounts[leftCode];
+    delete this.voiceChannelUsers[leftCode];
+    // If the right panel is currently showing this channel's voice users,
+    // empty it immediately so the user sees the leave reflected on click.
+    if (this.currentChannel === leftCode) {
+      this._renderVoiceUsers([]);
+    }
+    this._updateChannelVoiceIndicators();
+  }
   this._showToast(t('voice.left'), 'info');
 },
 

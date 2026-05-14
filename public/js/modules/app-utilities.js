@@ -2062,18 +2062,30 @@ _showFullReactionPicker(msgEl, msgId, quickPicker) {
     searchTimer = setTimeout(() => renderAll(searchInput.value.trim()), 150);
   });
 
-  // Position the panel relative to quick picker so it never overlaps it
-  quickPicker.appendChild(panel);
-  if (quickPicker.classList.contains('flip-below')) {
-    panel.classList.add('flip-below');
-  }
+  // Pop to body with fixed positioning so the panel never causes the messages
+  // container to scroll-jump when the message is near the top of the viewport.
+  document.body.appendChild(panel);
+  panel.style.position = 'fixed';
+  panel.style.zIndex = '100020';
+  panel.style.bottom = 'auto';
+  panel.style.right = 'auto';
 
   requestAnimationFrame(() => {
-    const panelRect = panel.getBoundingClientRect();
-    const container = msgEl.closest('#thread-messages, #messages, #dm-pip-messages');
-    const containerTop = container ? container.getBoundingClientRect().top : 0;
-    if (panelRect.top < containerTop + 4) {
-      panel.classList.add('flip-below');
+    const qRect = quickPicker.getBoundingClientRect();
+    const panelH = panel.offsetHeight;
+    const panelW = panel.offsetWidth;
+
+    // Right-align with the quick picker, clamped to viewport edges
+    let left = qRect.right - panelW;
+    if (left < 8) left = 8;
+    if (left + panelW > window.innerWidth - 8) left = window.innerWidth - panelW - 8;
+    panel.style.left = left + 'px';
+
+    // Open above the quick picker if there's room, otherwise open below
+    if (qRect.top - 6 >= panelH + 8) {
+      panel.style.top = (qRect.top - panelH - 6) + 'px';
+    } else {
+      panel.style.top = (qRect.bottom + 6) + 'px';
     }
   });
   searchInput.focus();

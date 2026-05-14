@@ -802,8 +802,18 @@ _setupSocketListeners() {
     // user is either viewing the channel OR currently in voice on it.
     const isViewing = data.channelCode === this.currentChannel;
     const isInVoice = !!(this.voice && this.voice.inVoice && this.voice.currentChannel === data.channelCode);
+    // (#5347 v3.16.1) Defensively filter ourselves out of the user list
+    // when we're NOT in voice on this channel. Guards against an in-flight
+    // broadcast that was queued before our voice-leave was processed
+    // (or reaches us out of order) re-populating the panel with our own
+    // entry after we've clicked Leave.
+    let users = Array.isArray(data.users) ? data.users : [];
+    const myId = this.user && this.user.id;
+    if (myId && !isInVoice) {
+      users = users.filter(u => u.id !== myId);
+    }
     if ((isViewing || isInVoice) && localStorage.getItem('haven_hide_voice_panel') !== 'true') {
-      this._renderVoiceUsers(data.users);
+      this._renderVoiceUsers(users);
     }
     // (#5347 v3.15.4) Keep the left sidebar in sync with the right panel.
     // Previously the right panel was driven by voice-users-update and the
@@ -811,7 +821,7 @@ _setupSocketListeners() {
     // event arrived stale or out of order (the user saw both users on the
     // right but only themselves on the left). Both stores are now updated
     // from this single authoritative event so they cannot disagree.
-    const usersForSidebar = (data.users || []).map(u => ({
+    const usersForSidebar = users.map(u => ({
       id: u.id, username: u.username,
       isMuted: !!u.isMuted, isDeafened: !!u.isDeafened
     }));
@@ -835,9 +845,21 @@ _setupSocketListeners() {
   // voice-users-update is dropped. The voice-users-update handler is the
   // primary source of truth.
   this.socket.on('voice-count-update', (data) => {
-    if (data.count > 0) {
-      this.voiceCounts[data.code] = data.count;
-      this.voiceChannelUsers[data.code] = data.users || [];
+    // (#5347 v3.16.1) Same defensive self-filter as voice-users-update —
+    // if we're not actually in voice on this channel, strip ourselves
+    // from the broadcast so a stale message can't keep our own entry on
+    // the sidebar after we've left.
+    let usersList = Array.isArray(data.users) ? data.users : [];
+    let count = typeof data.count === 'number' ? data.count : usersList.length;
+    const myId = this.user && this.user.id;
+    const inThisVoice = !!(this.voice && this.voice.inVoice && this.voice.currentChannel === data.code);
+    if (myId && !inThisVoice && usersList.some(u => u.id === myId)) {
+      usersList = usersList.filter(u => u.id !== myId);
+      count = Math.max(0, count - 1);
+    }
+    if (count > 0) {
+      this.voiceCounts[data.code] = count;
+      this.voiceChannelUsers[data.code] = usersList;
     } else {
       delete this.voiceCounts[data.code];
       delete this.voiceChannelUsers[data.code];

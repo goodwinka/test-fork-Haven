@@ -11,6 +11,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Haven uses [Sema
 
 ---
 
+## [3.16.2] — 2026-05-13
+
+### Fixed
+- **[Windows] Start Haven.bat crashes CMD past v3.15.1 (#5358).** The SSL cert-generation block was restructured to use `goto` labels instead of a compound `else-if` + `call :subroutine`. On some Windows versions, returning from a `call` subroutine nested inside an `else-if` compound block causes cmd.exe to exit the script rather than return to the caller, closing the CMD window without any error output. The new `goto`-based flow keeps `%OPENSSL_CMD%` as a plain statement (outside any compound block) so it expands correctly at execution time without needing a subroutine at all, preserving the fix from #5351.
+- **Published/custom theme not retained after page refresh (#5359).** Two root causes: (1) `window.havenSocket` was never assigned, so when a user clicked a published file theme button, the `set-preference` socket event was silently dropped and the server never stored the preference. On next load the server sent back an empty theme preference and the client fell through to the server's default theme, overwriting the `file:xxx` value in localStorage. Fixed by assigning `window.havenSocket` in `app.js` after the socket is created. (2) `theme-init.js` only set `data-theme` on early load; for `file:` themes it did not inject the CSS `<link>`, causing a flash of unstyled content on app.html refresh and no theme at all on the login page (where plugin-loader never runs). Fixed by injecting the `<link>` tag in `theme-init.js` when the saved theme is a `file:` theme, using `data-theme="haven"` as a stable base — matching what `applyFileTheme()` does — so the file theme applies immediately on both the app and login pages.
+
+---
+
+## [3.16.1] — 2026-05-12
+
+### Fixed
+- Voice presence: clicking Leave Voice now clears the right voice panel and the channel sidebar count immediately, without waiting for the server's `voice-users-update` broadcast to come back. After the server emit, the leaver was no longer in the `voice:<code>` room, so the broadcast could miss them and the panel stayed showing them as a participant. Mirrors the optimistic update already done on join. (#5347)
+- Voice presence: defensively filter the local user out of incoming `voice-users-update` and `voice-count-update` payloads when not actually in voice on that channel, so a stale or in-flight broadcast can't re-populate the panel/sidebar after a leave.
+
+---
+
+## [3.15.8] — 2026-05-12
+
+The one nobody saw coming. The reason all the v3.15.3-3.15.7 voice fixes appeared not to work for users is that **none of the client-side changes since v3.14.14 were actually being delivered to browsers.** The `<script>` cache-bust strings in app.html were pinned at `?v=3.15.2` and the ES-module imports inside app.js (which load app-voice.js, app-socket.js, app-users.js, etc.) were pinned at `?v=3.14.14`. Browsers happily kept serving the cached pre-3.15.4 client JS even on a fully-updated 3.15.7 server. So everything fixed since v3.14.14 was running on the server but missing from the client. The screen-share renegotiation work (3.15.5), the sidebar/voice-panel sync (3.15.4), the `_softLeave` rejoin path (3.15.4), the persona autocomplete fixes (3.15.6) — none of it ever ran in any browser. Apologies for the runaround on this one. (#5347)
+
+### Fixed
+- Bumped every `?v=` cache-bust string in `public/app.html` (3.15.2 → 3.15.8) and `public/js/app.js` (3.14.14 → 3.15.8). Forces every browser to fetch the post-3.14.14 client JS that the previous releases shipped to the server but never to the user.
+
+---
+
 ## [3.15.7] — 2026-05-09
 
 Hotfix on top of 3.15.4-3.15.6 (#5347). The voice presence work in 3.15.4 added a `getUserAllRoles` lookup inside `broadcastVoiceUsers` but the helper was never destructured from `createPermissions(db)`, so every voice broadcast (join, leave, mute, etc.) was throwing `ReferenceError: getUserAllRoles is not defined`. The error happened inside an async socket handler, so the server stayed up but the broadcast never completed: clients kept showing whoever was last successfully broadcast, ghost users persisted after leaves, and rejoiners didn't appear in the roster until everyone left and rejoined. This is the actual cause of the long-standing "voice list disagrees with reality" symptom, not the things 3.15.3-3.15.5 patched around it.
