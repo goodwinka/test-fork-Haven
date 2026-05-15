@@ -221,7 +221,7 @@ app.use('/themes',  express.static(THEMES_DIR,  { dotfiles: 'deny', maxAge: 0 })
 // API: list available plugins (*.plugin.js files)
 app.get('/api/plugins', (req, res) => {
   try {
-    const files = fs.readdirSync(PLUGINS_DIR).filter(f => f.endsWith('.plugin.js'));
+    const files = fs.readdirSync(PLUGINS_DIR).filter(f => f.toLowerCase().endsWith('.plugin.js'));
     const plugins = files.map(f => {
       // Try to read metadata from the first comment block
       const content = fs.readFileSync(path.join(PLUGINS_DIR, f), 'utf8');
@@ -247,7 +247,7 @@ app.get('/api/plugins', (req, res) => {
 // API: list available themes (*.theme.css files)
 app.get('/api/themes', (req, res) => {
   try {
-    const files = fs.readdirSync(THEMES_DIR).filter(f => f.endsWith('.theme.css'));
+    const files = fs.readdirSync(THEMES_DIR).filter(f => f.toLowerCase().endsWith('.theme.css'));
     let published = [];
     try {
       const row = db.prepare("SELECT value FROM server_settings WHERE key = 'published_themes'").get();
