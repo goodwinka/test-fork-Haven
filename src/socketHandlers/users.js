@@ -3,6 +3,7 @@
 const path = require('path');
 const fs   = require('fs');
 const { utcStamp, isString, isInt, sanitizeText, isValidUploadPath } = require('./helpers');
+const { writeUserGitconfig, loadGitSettingsFromDb } = require('../gitConfig');
 
 module.exports = function register(socket, ctx) {
   const { io, db, state, getChannelRoleChain, userHasPermission,
@@ -456,12 +457,25 @@ module.exports = function register(socket, ctx) {
     const key = typeof data.key === 'string' ? data.key.trim() : '';
     const value = typeof data.value === 'string' ? data.value.trim() : '';
 
-    const allowedKeys = ['theme', 'hide_score_badge'];
-    if (!allowedKeys.includes(key) || !value || value.length > 50) return;
+    const allowedKeys = ['theme', 'hide_score_badge', 'git_name', 'git_email', 'git_proxy', 'git_ssl_noverify', 'git_gitlabs'];
+    if (!allowedKeys.includes(key)) return;
+    const isGitKey = key.startsWith('git_');
+    const maxLen = isGitKey ? 4000 : 50;
+    if (value.length > maxLen) return;
+    if (!isGitKey && !value) return;
 
     db.prepare(
       'INSERT OR REPLACE INTO user_preferences (user_id, key, value) VALUES (?, ?, ?)'
     ).run(socket.user.id, key, value);
+
+    if (key.startsWith('git_')) {
+      try {
+        const settings = loadGitSettingsFromDb(db, socket.user.id, socket.user.username);
+        writeUserGitconfig(socket.user.username, settings);
+      } catch (err) {
+        console.error('Failed to write user .gitconfig:', err);
+      }
+    }
 
     socket.emit('preference-saved', { key, value });
 

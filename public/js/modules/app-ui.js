@@ -2706,6 +2706,7 @@ _setupUI() {
     // sit on "Loading..." indefinitely if the user never clicks the nav item.
     loadTotpStatus();
     if (this.user?.isAdmin) this._loadRoles();
+    loadGitSettings();
   };
   document.getElementById('open-settings-btn').addEventListener('click', openSettingsModal);
   document.getElementById('mobile-settings-btn')?.addEventListener('click', () => {
@@ -2798,6 +2799,65 @@ _setupUI() {
   document.getElementById('language-select')?.addEventListener('change', (e) => {
     if (window.i18n) i18n.setLocale(e.target.value);
   });
+
+  // ── Git account settings (Web UI) ─────────────────────
+  const loadGitSettings = () => {
+    document.getElementById('git-name-input').value = localStorage.getItem('haven_git_name') || this.user?.username || '';
+    document.getElementById('git-email-input').value = localStorage.getItem('haven_git_email') || ((this.user?.username || 'user') + '@localhost');
+    document.getElementById('git-proxy-input').value = localStorage.getItem('haven_git_proxy') || '';
+    document.getElementById('git-ssl-noverify').checked = localStorage.getItem('haven_git_ssl_noverify') === 'true';
+    document.getElementById('git-gitlabs-input').value = localStorage.getItem('haven_git_gitlabs') || '';
+
+    // Prefer server-persisted values when available (works across devices/sessions)
+    this.socket.off('preferences', this._gitPrefsHandler);
+    this._gitPrefsHandler = (prefs = {}) => {
+      if (typeof prefs.git_name === 'string') {
+        localStorage.setItem('haven_git_name', prefs.git_name);
+        document.getElementById('git-name-input').value = prefs.git_name || this.user?.username || '';
+      }
+      if (typeof prefs.git_email === 'string') {
+        localStorage.setItem('haven_git_email', prefs.git_email);
+        document.getElementById('git-email-input').value = prefs.git_email || ((this.user?.username || 'user') + '@localhost');
+      }
+      if (typeof prefs.git_proxy === 'string') {
+        localStorage.setItem('haven_git_proxy', prefs.git_proxy);
+        document.getElementById('git-proxy-input').value = prefs.git_proxy;
+      }
+      if (typeof prefs.git_ssl_noverify === 'string') {
+        localStorage.setItem('haven_git_ssl_noverify', prefs.git_ssl_noverify);
+        document.getElementById('git-ssl-noverify').checked = prefs.git_ssl_noverify === 'true';
+      }
+      if (typeof prefs.git_gitlabs === 'string') {
+        localStorage.setItem('haven_git_gitlabs', prefs.git_gitlabs);
+        document.getElementById('git-gitlabs-input').value = prefs.git_gitlabs;
+      }
+    };
+    this.socket.on('preferences', this._gitPrefsHandler);
+    this.socket.emit('get-preferences');
+  };
+
+  const gitSaveBtn = document.getElementById('git-settings-save-btn');
+  if (gitSaveBtn) {
+    gitSaveBtn.addEventListener('click', () => {
+      const name = document.getElementById('git-name-input').value.trim() || (this.user?.username || 'user');
+      const email = document.getElementById('git-email-input').value.trim() || `${(this.user?.username || 'user')}@localhost`;
+      const proxy = document.getElementById('git-proxy-input').value.trim();
+      const sslNoVerify = document.getElementById('git-ssl-noverify').checked ? 'true' : 'false';
+      const gitlabs = document.getElementById('git-gitlabs-input').value.trim();
+      localStorage.setItem('haven_git_name', name);
+      localStorage.setItem('haven_git_email', email);
+      localStorage.setItem('haven_git_proxy', proxy);
+      localStorage.setItem('haven_git_ssl_noverify', sslNoVerify);
+      localStorage.setItem('haven_git_gitlabs', gitlabs);
+      this.socket.emit('set-preference', { key: 'git_name', value: name });
+      this.socket.emit('set-preference', { key: 'git_email', value: email });
+      this.socket.emit('set-preference', { key: 'git_proxy', value: proxy });
+      this.socket.emit('set-preference', { key: 'git_ssl_noverify', value: sslNoVerify });
+      this.socket.emit('set-preference', { key: 'git_gitlabs', value: gitlabs });
+      const status = document.getElementById('git-settings-status');
+      if (status) status.textContent = '✅ Git settings saved';
+    });
+  }
 
   // ── Password change ──────────────────────────────────
   document.getElementById('change-password-btn').addEventListener('click', async () => {

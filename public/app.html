@@ -1092,6 +1092,8 @@
           <div class="settings-nav-item" data-target="section-2fa">🔐 <span data-i18n="settings.nav.two_factor">Two-Factor</span></div>
           <div class="settings-nav-item" data-target="section-recovery">🔑 <span data-i18n="settings.nav.recovery">Recovery</span></div>
           <div class="settings-nav-item" data-target="section-delete-account">⚠️ <span data-i18n="settings.nav.account">Account</span></div>
+          <div class="settings-nav-item" data-target="section-git">🔧 Git</div>
+
           <div class="settings-nav-item" data-target="section-plugins">🧩 <span data-i18n="settings.nav.plugins">Plugins & Themes</span></div>
           <div class="settings-nav-item" data-target="section-desktop-shortcuts" id="desktop-shortcuts-nav" style="display:none">⌨️ <span data-i18n="settings.nav.shortcuts">Shortcuts</span></div>
           <div class="settings-nav-item" data-target="section-desktop-app" id="desktop-app-nav" style="display:none">🖥️ <span data-i18n="settings.nav.desktop_app">Desktop App</span></div>
@@ -1587,6 +1589,20 @@
           <button class="btn-sm btn-full" id="recovery-copy-btn" style="margin-top:8px">📋 <span data-i18n="settings.recovery_section.copy_codes_btn">Copy Codes</span></button>
           <button class="btn-sm btn-full" id="recovery-codes-done-btn" data-i18n="settings.recovery_section.done_btn" style="margin-top:6px">Done</button>
         </div>
+      </div>
+
+      <!-- Git Settings Section -->
+      <div class="settings-section" id="section-git">
+        <h5 class="settings-section-title">🔧 Git</h5>
+        <p class="settings-hint" style="margin-bottom:8px">Configure Git identity and GitLab token routing for Web IDE tasks.</p>
+        <div class="form-group compact"><input type="text" id="git-name-input" placeholder="Git user.name"></div>
+        <div class="form-group compact"><input type="email" id="git-email-input" placeholder="Git user.email"></div>
+        <div class="form-group compact"><input type="text" id="git-proxy-input" placeholder="Proxy URL (optional, e.g. http://proxy:3128)"></div>
+        <label class="toggle-row"><span>Disable SSL verification (unsafe)</span><input type="checkbox" id="git-ssl-noverify"></label>
+        <small class="settings-hint" style="display:block;margin-bottom:6px">GitLab servers (one per line): https://gitlab.example.com|TOKEN</small>
+        <textarea id="git-gitlabs-input" class="edit-profile-textarea" rows="4" placeholder="https://gitlab.com|glpat-xxx"></textarea>
+        <button class="btn-sm btn-full btn-accent" id="git-settings-save-btn" style="margin-top:8px">Save Git Settings</button>
+        <small class="settings-hint" id="git-settings-status"></small>
       </div>
 
       <!-- Delete Account Section -->
