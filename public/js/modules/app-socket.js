@@ -1059,15 +1059,20 @@ _setupSocketListeners() {
 
   // ── Stream viewer tracking ───────────────────────
   this._streamInfo = []; // Array of { sharerId, sharerName, viewers: [{ id, username }] }
-  this.socket.on('stream-viewers-update', (data) => {
-    this._streamInfo = data.streams || [];
+  const applyStreamInfo = (data) => {
+    this._streamInfo = data?.streams || [];
     this._updateStreamViewerBadges();
     // Always re-render voice users so the LIVE viewer count updates
     // regardless of which text channel the user is viewing
     if (this._lastVoiceUsers) {
       this._renderVoiceUsers(this._lastVoiceUsers);
     }
-  });
+  };
+  this.socket.on('stream-viewers-update', applyStreamInfo);
+  // Some server paths (including channel entry snapshots) emit `stream-info`.
+  // Accept both event names so users still see already-running streams when
+  // opening a channel after the stream started.
+  this.socket.on('stream-info', applyStreamInfo);
 
   // ── Channel members (for @mentions) ────────────────
   this.socket.on('channel-members', (data) => {

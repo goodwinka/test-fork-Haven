@@ -56,6 +56,7 @@ class VoiceManager {
     const savedRes = localStorage.getItem('haven_screen_res');
     this.screenResolution = savedRes !== null ? parseInt(savedRes, 10) : 1080;  // 0 = source
     this.screenFrameRate = parseInt(localStorage.getItem('haven_screen_fps') || '30', 10) || 30;
+    this.screenBitrateMultiplier = parseInt(localStorage.getItem('haven_screen_bitrate_multiplier') || '1', 10) || 1;
 
     // Bitrate map: resolution → bits/sec  (sensible defaults per resolution)
     this._screenBitrates = {
@@ -399,7 +400,7 @@ class VoiceManager {
       if (missing.length) {
         missing.forEach(track => conn.addTrack(track, this.screenStream));
         const res = this.screenResolution;
-        const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
+        const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
         this._applyScreenBitrate(conn, maxBitrate);
       }
 
@@ -825,7 +826,7 @@ class VoiceManager {
       this.socket.emit('screen-share-started', { code: this.currentChannel, hasAudio });
 
       // Add screen tracks to all existing peer connections and cap bitrate
-      const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
+      const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
       for (const [userId, peer] of this.peers) {
         this.screenStream.getTracks().forEach(track => {
           peer.connection.addTrack(track, this.screenStream);
@@ -1013,6 +1014,18 @@ class VoiceManager {
     if (this.isScreenSharing) this._applyLiveQualityChange();
   }
 
+
+  setScreenBitrateMultiplier(multiplier) {
+    const allowed = new Set([1, 2, 4, 8]);
+    const m = parseInt(multiplier, 10);
+    if (!allowed.has(m)) return;
+    this.screenBitrateMultiplier = m;
+    localStorage.setItem('haven_screen_bitrate_multiplier', String(m));
+
+    if (!this.isScreenSharing) return;
+    this._reapplyScreenEncodingProfile();
+  }
+
   setScreenFrameRate(fps) {
     this.screenFrameRate = fps;  // 15 | 30 | 60
     localStorage.setItem('haven_screen_fps', fps);
@@ -1046,8 +1059,14 @@ class VoiceManager {
       console.warn('applyConstraints failed (browser may not support live constraint changes):', e);
     }
 
-    // Update bitrate cap on all peer senders
-    const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
+    // Reapply full sender encoding profile for all active peers so
+    // quality changes from the UI take effect immediately.
+    this._reapplyScreenEncodingProfile();
+  }
+
+  _reapplyScreenEncodingProfile() {
+    const res = this.screenResolution;
+    const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
     for (const [, peer] of this.peers) {
       this._applyScreenBitrate(peer.connection, maxBitrate);
     }
@@ -1068,6 +1087,19 @@ class VoiceManager {
             params.encodings = [{}];
           }
           params.encodings[0].maxBitrate = maxBitrate;
+          // Prefer quality under network pressure: keep bitrate near the cap.
+          // Some browsers ignore minBitrate, but where supported this prevents
+          // aggressive compression swings for screen text/detail.
+          params.encodings[0].minBitrate = Math.floor(maxBitrate * 0.8);
+          // Keep source resolution (disable automatic spatial downscale).
+          params.encodings[0].scaleResolutionDownBy = 1;
+          // Spend bitrate predictably according to selected screen-share FPS profile.
+          params.encodings[0].maxFramerate = this.screenFrameRate;
+          // Optional transport hints; ignored by browsers that don't support them.
+          params.encodings[0].priority = 'high';
+          params.encodings[0].networkPriority = 'high';
+          // Prefer preserving resolution during adaptation over smearing details.
+          params.degradationPreference = 'maintain-resolution';
           sender.setParameters(params).catch(() => {});
         }
       }
@@ -1173,7 +1205,7 @@ class VoiceManager {
       });
       // Cap bitrate for this new peer
       const res = this.screenResolution;
-      const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
+      const maxBitrate = (this._screenBitrates[res] || this._screenBitrates[0]) * this.screenBitrateMultiplier;
       this._applyScreenBitrate(connection, maxBitrate);
     }
 
@@ -1259,6 +1291,15 @@ class VoiceManager {
         const streamHasVideo = sourceStream && sourceStream.getVideoTracks().length > 0;
         const knownAsScreen = sourceStream && knownScreenStreamIds.has(sourceStream.id);
         const isScreenAudio = knownAsScreen || (peerIsSharing && streamHasVideo);
+
+        // Race condition guard: for some peers, screen-share audio can arrive
+        // before the corresponding video stream is observed. If we route this
+        // early track into the voice path, users may hear no game/window audio.
+        // Defer ambiguous audio until a matching screen video stream is known.
+        if (!isScreenAudio && peerIsSharing && sourceStream && !knownAsScreen) {
+          deferredAudio.push({ track, sourceStream });
+          return;
+        }
 
         if (isScreenAudio) {
           this._playScreenAudio(userId, sourceStream);

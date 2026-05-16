@@ -1234,9 +1234,18 @@ _showScreenShareIndicator(count) {
         grid.querySelectorAll('.screen-share-tile[data-hidden="true"]').forEach(t => {
           t.style.display = '';
           delete t.dataset.hidden;
+
+          // Re-play video after being hidden; some browsers pause render on display:none.
+          const vid = t.querySelector('video');
+          if (vid && vid.srcObject) vid.play().catch(() => {});
+
+          const uid = t.id.replace('screen-tile-', '');
           if (t.dataset.muted === 'true') {
             delete t.dataset.muted;
-            const uid = t.id.replace('screen-tile-', '');
+            // Resume the paused audio element first, then restore gain volume.
+            const audioEl = document.getElementById(`voice-audio-screen-${uid}`);
+            if (audioEl && audioEl.paused) { try { audioEl.play(); } catch {} }
+
             const volSlider = t.querySelector('.stream-vol-slider');
             const vol = volSlider ? parseInt(volSlider.value) / 100 : 1;
             this.voice.setStreamVolume(uid, vol);
@@ -1382,26 +1391,17 @@ _closeScreenShare() {
   const grid = document.getElementById('screen-share-grid');
   const tiles = grid ? grid.querySelectorAll('.screen-share-tile') : [];
 
-  // Mute all remote stream audio and fully remove tiles
+  // Hide all remote stream tiles so they can be restored from LIVE badges
+  // without requiring a full channel rejoin.
   tiles.forEach(t => {
     const uid = t.id.replace('screen-tile-', '');
-    this.voice.setStreamVolume(uid, 0);
-    const audioEl = document.getElementById(`voice-audio-screen-${uid}`);
-    if (audioEl) { audioEl.volume = 0; try { audioEl.pause(); } catch {} }
-    // Notify server we stopped watching
-    if (this.voice && this.voice.inVoice && uid !== String(this.user.id)) {
-      this.socket.emit('stream-unwatch', { code: this.voice.currentChannel, sharerId: parseInt(uid) || uid });
-    }
-    const vid = t.querySelector('video');
-    if (vid) vid.srcObject = null;
-    t.remove();
+    this._hideStreamTile(t, parseInt(uid) || uid, null, true);
   });
 
   container.style.display = 'none';
   container.classList.remove('stream-focus-mode');
   this._screenShareMinimized = false;
   this._removeScreenShareIndicator();
-  document.getElementById('hidden-streams-bar')?.remove();
 },
 
 // ── Screen Share Audio ──────────────────────────────
@@ -1591,7 +1591,11 @@ _popOutStream(tile, userId) {
   if (tile.classList.contains('stream-popped-out')) return;
 
   // Try native Picture-in-Picture first (OS-level window, can be dragged to other screens)
-  if (document.pictureInPictureEnabled && !video.disablePictureInPicture) {
+  // Browser PiP supports only one window at a time, so fall back to Haven overlay
+  // when another stream is already in PiP to allow multiple popped-out streams.
+  const canUseNativePip = document.pictureInPictureEnabled && !video.disablePictureInPicture;
+  const anotherPipAlreadyOpen = !!document.pictureInPictureElement && document.pictureInPictureElement !== video;
+  if (canUseNativePip && !anotherPipAlreadyOpen) {
     video.requestPictureInPicture().then(() => {
       const popoutBtn = tile.querySelector('.stream-popout-btn');
       if (popoutBtn) { popoutBtn.textContent = '\u29C8'; popoutBtn.title = t('media.pop_in_stream'); }
@@ -1619,8 +1623,84 @@ _popOutStreamWindow(tile, userId) {
   const stream = video.srcObject;
   const peer = this.voice.peers.get(userId);
   const who = userId === null || userId === this.user.id ? 'You' : (peer ? peer.username : 'Stream');
+  const streamKey = userId ?? 'self';
 
-  // Create floating in-page overlay (like music PiP) instead of window.open
+  if (!this._streamPopoutWindows) this._streamPopoutWindows = new Map();
+
+  const existingWin = this._streamPopoutWindows.get(streamKey);
+  if (existingWin && !existingWin.closed) {
+    existingWin.focus();
+    return;
+  }
+
+  const features = 'popup=yes,width=960,height=600,resizable=yes,scrollbars=no';
+  const streamWin = window.open('', `haven-stream-${streamKey}`, features);
+  if (!streamWin) {
+    // Popup blocked: fall back to in-page overlay.
+    this._popOutStreamOverlay(tile, userId);
+    return;
+  }
+
+  this._streamPopoutWindows.set(streamKey, streamWin);
+
+  streamWin.document.title = `Haven Stream — ${who}`;
+  streamWin.document.body.style.margin = '0';
+  streamWin.document.body.style.background = '#000';
+  streamWin.document.body.style.display = 'flex';
+  streamWin.document.body.style.flexDirection = 'column';
+
+  const videoEl = streamWin.document.createElement('video');
+  videoEl.autoplay = true;
+  videoEl.playsInline = true;
+  videoEl.muted = true;
+  videoEl.controls = true;
+  videoEl.srcObject = stream;
+  videoEl.style.width = '100vw';
+  videoEl.style.height = '100vh';
+  videoEl.style.objectFit = 'contain';
+  videoEl.style.background = '#000';
+  streamWin.document.body.appendChild(videoEl);
+  videoEl.play().catch(() => {});
+
+  const popoutBtn = tile.querySelector('.stream-popout-btn');
+  if (popoutBtn) { popoutBtn.textContent = '⧈'; popoutBtn.title = t('media.pop_in_stream'); }
+  tile.classList.add('stream-popped-out');
+  this._updateStreamContainerCollapse();
+
+  const popIn = () => {
+    if (!streamWin.closed) streamWin.close();
+    if (popoutBtn) { popoutBtn.textContent = '⧉'; popoutBtn.title = t('media.pop_out_stream'); }
+    tile.classList.remove('stream-popped-out');
+    this._updateStreamContainerCollapse();
+    this._streamPopoutWindows.delete(streamKey);
+  };
+
+  streamWin.addEventListener('beforeunload', () => {
+    if (popoutBtn) { popoutBtn.textContent = '⧉'; popoutBtn.title = t('media.pop_out_stream'); }
+    tile.classList.remove('stream-popped-out');
+    this._updateStreamContainerCollapse();
+    this._streamPopoutWindows.delete(streamKey);
+  });
+
+  const streamTrack = stream.getVideoTracks()[0];
+  if (streamTrack) {
+    const prevOnEnded = streamTrack.onended;
+    streamTrack.onended = () => {
+      if (prevOnEnded) prevOnEnded();
+      popIn();
+    };
+  }
+},
+
+_popOutStreamOverlay(tile, userId) {
+  const video = tile.querySelector('video');
+  if (!video || !video.srcObject) return;
+
+  const stream = video.srcObject;
+  const peer = this.voice.peers.get(userId);
+  const who = userId === null || userId === this.user.id ? 'You' : (peer ? peer.username : 'Stream');
+
+  // Create floating in-page overlay (fallback when popup is blocked)
   const pipId = `stream-pip-${userId || 'self'}`;
   if (document.getElementById(pipId)) return; // already open
 
@@ -1713,6 +1793,7 @@ _popOutStreamWindow(tile, userId) {
     };
   }
 },
+
 
 // ── Music Streaming ───────────────────────────────
 

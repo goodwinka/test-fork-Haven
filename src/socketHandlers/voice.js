@@ -448,9 +448,22 @@ module.exports = function register(socket, ctx) {
     if (!isInt(data.sharerId)) return;
     const voiceRoom = voiceUsers.get(data.code);
     if (!voiceRoom || !voiceRoom.has(socket.user.id)) return;
+
+    const sharer = voiceRoom.get(data.sharerId);
+    if (!sharer) return;
+
     const key = `${data.code}:${data.sharerId}`;
     if (!streamViewers.has(key)) streamViewers.set(key, new Set());
     streamViewers.get(key).add(socket.user.id);
+
+    // Force stream renegotiation with this watcher so clicking "Watch stream"
+    // can recover from stale/broken peer video without waiting for a new
+    // share event.
+    io.to(sharer.socketId).emit('renegotiate-screen', {
+      targetUserId: socket.user.id,
+      channelCode: data.code
+    });
+
     broadcastStreamInfo(data.code);
   });
 

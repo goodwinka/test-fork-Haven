@@ -552,23 +552,28 @@ function setupSocketHandlers(io, db) {
   // ── broadcastStreamInfo ─────────────────────────────────
   function broadcastStreamInfo(code) {
     const sharers = activeScreenSharers.get(code) || new Set();
-    const cams = activeWebcamUsers.get(code) || new Set();
     const streams = [];
     const voiceRoom = voiceUsers.get(code);
     for (const sharerId of sharers) {
       const viewerKey = `${code}:${sharerId}`;
       const viewerSet = streamViewers.get(viewerKey) || new Set();
       const sharerInfo = voiceRoom ? voiceRoom.get(sharerId) : null;
+      const viewers = [];
+      for (const viewerId of viewerSet) {
+        const viewerInfo = voiceRoom ? voiceRoom.get(viewerId) : null;
+        if (viewerInfo) viewers.push({ id: viewerId, username: viewerInfo.username });
+      }
       streams.push({
-        userId: sharerId, username: sharerInfo ? sharerInfo.username : 'Unknown',
-        type: 'screen', viewers: Array.from(viewerSet)
-      });
-    }
-    for (const camUserId of cams) {
-      const camInfo = voiceRoom ? voiceRoom.get(camUserId) : null;
-      streams.push({
-        userId: camUserId, username: camInfo ? camInfo.username : 'Unknown',
-        type: 'webcam', viewers: []
+        // Keep shape compatible with `stream-viewers-update` from voice.js,
+        // while preserving legacy keys for older clients.
+        sharerId,
+        sharerName: sharerInfo ? sharerInfo.username : 'Unknown',
+        viewers,
+        // Legacy compatibility
+        userId: sharerId,
+        username: sharerInfo ? sharerInfo.username : 'Unknown',
+        type: 'screen',
+        viewerIds: Array.from(viewerSet)
       });
     }
     io.to(`voice:${code}`).to(`channel:${code}`).emit('stream-info', { channelCode: code, streams });

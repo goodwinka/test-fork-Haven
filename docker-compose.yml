@@ -8,8 +8,8 @@
 
 services:
   haven:
-    image: ghcr.io/ancsemi/haven:latest
-    # build: .                    # Uncomment to build from source instead of using the pre-built image
+    image: goodwin_haven:latest
+    build: .                    # Uncomment to build from source instead of using the pre-built image
     container_name: haven
     ports:
       - "${PORT:-3000}:${PORT:-3000}"    # Main HTTPS port
