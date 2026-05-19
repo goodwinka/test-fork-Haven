@@ -1813,6 +1813,9 @@ class VoiceManager {
       // Expose current level for UI meter (0-100 scale, capped)
       this.currentMicLevel = Math.min(100, (avg / 50) * 100);
 
+      // Guard against audioCtx being torn down between ticks (leave()
+      // nulls it but the interval can still fire once before we clear it).
+      if (!this.audioCtx) return;
       if (avg > threshold) {
         // Signal is above threshold — confirm it sustains before opening
         aboveCount++;
@@ -1826,6 +1829,7 @@ class VoiceManager {
         if (gateOpen && !holdTimeout) {
           // Signal dropped below threshold — start hold timer before closing
           holdTimeout = setTimeout(() => {
+            if (!this.audioCtx) return;
             gain.gain.setTargetAtTime(0, this.audioCtx.currentTime, RELEASE);
             gateOpen = false;
             holdTimeout = null;

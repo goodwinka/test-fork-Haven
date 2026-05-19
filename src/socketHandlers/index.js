@@ -993,8 +993,35 @@ function setupSocketHandlers(io, db) {
             }
           }
           if (channelUsers.has(oldCode)) { channelUsers.set(newCode, channelUsers.get(oldCode)); channelUsers.delete(oldCode); }
+          // Migrate voice room socket-membership AND map entry. Without
+          // moving sockets from voice:<oldCode> to voice:<newCode> they'd
+          // stop receiving voice broadcasts after rotation, and without
+          // notifying them they'd keep emitting voice events with the old
+          // code — the exact "voice channel is gone" loop from #5347.
+          const oldVoiceRoom = `voice:${oldCode}`;
+          const newVoiceRoom = `voice:${newCode}`;
+          const voiceRoomSockets = io.sockets.adapter.rooms.get(oldVoiceRoom);
+          if (voiceRoomSockets) {
+            for (const sid of [...voiceRoomSockets]) {
+              const s = io.sockets.sockets.get(sid);
+              if (s) { s.leave(oldVoiceRoom); s.join(newVoiceRoom); }
+            }
+          }
           if (voiceUsers.has(oldCode)) { voiceUsers.set(newCode, voiceUsers.get(oldCode)); voiceUsers.delete(oldCode); }
+          // Also migrate any pendingVoiceLeave grace timers keyed by oldCode
+          // so a disconnect that landed mid-rotation can still be cancelled.
+          for (const [key, val] of [...pendingVoiceLeave.entries()]) {
+            if (key.endsWith(':' + oldCode)) {
+              const userId = key.split(':')[0];
+              pendingVoiceLeave.delete(key);
+              pendingVoiceLeave.set(`${userId}:${newCode}`, val);
+            }
+          }
+          // Emit to BOTH the text-channel room AND the voice room — voice
+          // participants who aren't actively viewing the text channel
+          // would otherwise miss this and stay desynced.
           io.to(newRoom).emit('channel-code-rotated', { channelId: ch.id, oldCode, newCode });
+          io.to(newVoiceRoom).emit('channel-code-rotated', { channelId: ch.id, oldCode, newCode });
           console.log(`🔄 Auto-rotated code for channel "${ch.name}": ${oldCode} → ${newCode}`);
         }
       }

@@ -1222,6 +1222,22 @@ _setupSocketListeners() {
       if (this.currentChannel === data.oldCode) {
         this.currentChannel = data.newCode;
       }
+      // CRITICAL (#5347): if we're in voice on the rotated channel, the
+      // voice manager is still holding the OLD code as its currentChannel.
+      // Without updating it, every voice-rejoin / request-voice-users /
+      // voice-mute-state / etc. sent from this client uses the old code,
+      // the server can't find it (the DB row's code column was just
+      // updated), and we get the infinite "server says voice channel is
+      // gone" loop. Migrate every voice-side code reference too.
+      if (this.voice) {
+        if (this.voice.currentChannel === data.oldCode) {
+          this.voice.currentChannel = data.newCode;
+          console.log(`[Voice] channel code rotated mid-call: ${data.oldCode} -> ${data.newCode}`);
+        }
+        if (this.voice._softLeftChannel === data.oldCode) {
+          this.voice._softLeftChannel = data.newCode;
+        }
+      }
       this._renderChannels();
       // If currently viewing this channel, update the header code display
       if (this.currentChannel === data.newCode) {
