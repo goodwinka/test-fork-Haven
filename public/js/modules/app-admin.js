@@ -2296,8 +2296,9 @@ async _maybeUploadEncryptedDmFile(file, code, ch) {
     if (code === this.currentChannel) this._clearReply();
     return true;
   } catch (err) {
-    console.warn('[E2E] File encryption failed:', err);
-    this._showToast(t('toasts.encrypted_image_failed') || 'Encrypted upload failed', 'error');
+    console.error('[E2E] File encryption failed:', err);
+    const _detail = err?.message ? ` — ${err.message}` : '';
+    this._showToast(`${t('toasts.encrypted_image_failed') || 'Encrypted upload failed'}${_detail}`, 'error');
     return true;
   }
 },
@@ -2994,6 +2995,12 @@ async _importExecute(importId, selectedChannels) {
     stepPreview.style.display = 'none';
     stepDone.style.display    = '';
     doneMsg.textContent = t(data.channelsCreated === 1 ? 'settings.admin.import_success_one' : 'settings.admin.import_success_other', { count: data.channelsCreated, messages: data.messagesImported.toLocaleString() });
+    if (data.channelsReused > 0) {
+      doneMsg.textContent += ' ' + t('settings.admin.import_reused', { count: data.channelsReused });
+    }
+    if (data.messagesSkipped > 0) {
+      doneMsg.textContent += ' ' + t('settings.admin.import_skipped', { count: data.messagesSkipped.toLocaleString() });
+    }
 
     // Refresh channel list
     if (this.socket) this.socket.emit('get-channels');

@@ -4,17 +4,17 @@
 //           notifications, volume sliders, status bar
 // ═══════════════════════════════════════════════════════════
 
-import SocketMethods   from './modules/app-socket.js?v=3.14.14';
-import UIBindMethods   from './modules/app-ui.js?v=3.14.14';
-import MediaMethods    from './modules/app-media.js?v=3.14.14';
-import ContextMethods  from './modules/app-context.js?v=3.14.14';
-import ChannelMethods  from './modules/app-channels.js?v=3.14.14';
-import MessageMethods  from './modules/app-messages.js?v=3.14.14';
-import UserMethods     from './modules/app-users.js?v=3.14.14';
-import VoiceMethods    from './modules/app-voice.js?v=3.14.14';
-import UtilityMethods  from './modules/app-utilities.js?v=3.14.14';
-import AdminMethods    from './modules/app-admin.js?v=3.14.14';
-import PlatformMethods from './modules/app-platform.js?v=3.14.14';
+import SocketMethods   from './modules/app-socket.js?v=3.16.12';
+import UIBindMethods   from './modules/app-ui.js?v=3.16.12';
+import MediaMethods    from './modules/app-media.js?v=3.16.12';
+import ContextMethods  from './modules/app-context.js?v=3.16.12';
+import ChannelMethods  from './modules/app-channels.js?v=3.16.12';
+import MessageMethods  from './modules/app-messages.js?v=3.16.12';
+import UserMethods     from './modules/app-users.js?v=3.16.12';
+import VoiceMethods    from './modules/app-voice.js?v=3.16.12';
+import UtilityMethods  from './modules/app-utilities.js?v=3.16.12';
+import AdminMethods    from './modules/app-admin.js?v=3.16.12';
+import PlatformMethods from './modules/app-platform.js?v=3.16.12';
 
 class HavenApp {
   constructor() {
@@ -155,6 +155,9 @@ class HavenApp {
       reconnectionDelayMax: 10000,
       randomizationFactor: 0.4,
     });
+    // Expose socket globally so plugin-loader can emit set-preference
+    // when the user activates a published file theme (#5359)
+    window.havenSocket = this.socket;
     this.voice = new VoiceManager(this.socket);
     if (this.user && this.user.id) this.voice.localUserId = this.user.id;
     

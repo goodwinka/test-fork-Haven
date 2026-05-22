@@ -953,13 +953,13 @@
           <span class="discord-feat">🖥️ Windows &amp; Linux</span>
         </div>
         <div style="margin-top: 28px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
-          <a href="https://github.com/ancsemi/Haven-Desktop/releases/download/v1.4.14/Haven-Setup-1.4.14.exe" class="btn btn-primary" style="padding: 12px 24px; font-size: 1rem;">
+          <a href="https://github.com/ancsemi/Haven-Desktop/releases/download/v1.4.15/Haven-Setup-1.4.15.exe" class="btn btn-primary" style="padding: 12px 24px; font-size: 1rem;">
             <span class="icon">⬇</span> Windows Installer
           </a>
-          <a href="https://github.com/ancsemi/Haven-Desktop/releases/download/v1.4.14/Haven-1.4.14.AppImage" class="btn btn-primary" style="padding: 12px 24px; font-size: 1rem;">
+          <a href="https://github.com/ancsemi/Haven-Desktop/releases/download/v1.4.15/Haven-1.4.15.AppImage" class="btn btn-primary" style="padding: 12px 24px; font-size: 1rem;">
             <span class="icon">⬇</span> Linux AppImage
           </a>
-          <a href="https://github.com/ancsemi/Haven-Desktop/releases/download/v1.4.14/haven-desktop_1.4.14_amd64.deb" class="btn btn-primary" style="padding: 12px 24px; font-size: 1rem;">
+          <a href="https://github.com/ancsemi/Haven-Desktop/releases/download/v1.4.15/haven-desktop_1.4.15_amd64.deb" class="btn btn-primary" style="padding: 12px 24px; font-size: 1rem;">
             <span class="icon">⬇</span> Linux .deb
           </a>
         </div>
@@ -1415,12 +1415,12 @@
       </div>
 
       <div class="download-card fade-in">
-        <h2>&#x2B21; Haven Server &mdash; v3.15.1</h2>
+        <h2>&#x2B21; Haven Server &mdash; v3.16.15</h2>
         <p class="download-version">Latest stable release &middot; Windows, macOS &amp; Linux &middot; ~5 MB</p>
 
         <div class="download-btn-group">
-          <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.1.zip" class="btn btn-primary download-main">
-            <span class="icon">&#x2B07;</span> Download v3.15.1 (.zip)
+          <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.15.zip" class="btn btn-primary download-main">
+            <span class="icon">&#x2B07;</span> Download v3.16.15 (.zip)
           </a>
           <div class="download-alt-links">
             <a href="https://github.com/ancsemi/Haven" target="_blank">&#9965; View on GitHub</a>
@@ -1437,7 +1437,91 @@
           <div class="version-list">
             <div class="version-list-inner">
               <div class="version-item">
-                <div><span class="v-name">v3.15.1</span><span class="v-tag latest">Latest</span> &mdash; Polish pass on the Channel Media Gallery + Personas: persona prefix changed to <code>::Name your message</code> with autocomplete, <code>@PersonaName</code> mentions now resolve and ping the owner, fixed the bug where consecutive messages from different personas all stacked under the first persona's header, jump-to-message button on photo/video gallery tiles, video tiles open in an inline player instead of silently closing the gallery, image lightbox now sits above the gallery modal, top-bar header buttons follow the Colorful/Monochrome icon setting</div>
+                <div><span class="v-name">v3.16.15</span><span class="v-tag latest">Latest</span> &mdash; Voice chat: actual root cause of the recurring self-vanish glitch (#5347) fixed &mdash; channel code rotation desync caused voice clients to hold stale codes after server rotation, breaking reconnects until manual rejoin; null audioCtx crash on voice leave patched; version display regression from v3.16.14 corrected (servers reported v3.16.13 despite running v3.16.14) (#5369)</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.15.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.14</span> &mdash; Voice chat: server-side 4 s grace period before evicting a disconnected user so transient blips never broadcast <code>voice-user-left</code> to peers; fast-path rejoin that skips RTCPeerConnection renegotiation when the socket reconnects within the window; client-side roster watchdog that auto-fires <code>voice-rejoin</code> if we&rsquo;ve silently dropped off the server list &mdash; fixes the recurring self-vanish glitch (#5347)</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.14.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.13</span> &mdash; Channel and sub-channel composers are now drag-resizable up to 60% of the viewport (#5327). New sub-channels inherit their parent channel&rsquo;s role access on creation (#5328). Voice chat: deferred soft-leave on transient socket blips so quick reconnects no longer tear down the mic and peers, plus a self-heal that emits voice-rejoin automatically when the right panel notices we&rsquo;ve dropped off the server roster &mdash; no more manual leave+rejoin churn</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.13.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.12</span> &mdash; Voice chat audit: fixed missing-self in the right panel after server restart / reconnect races, stale roster ghosts after a reboot, and the &ldquo;clicked Start Voice 15 times during an outage and got 15 toasts at once&rdquo; spam-click flood</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.12.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.11</span> &mdash; Removed servers no longer reappear after a restart (Desktop bootstrap and sync paths now honor the local removed-set). Transient server restarts no longer log users out &mdash; the auth-error handler now requires three consecutive errors before bouncing to login</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.11.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.10</span> &mdash; Fixed displayed server version being stuck at v3.16.5 regardless of which release was installed (#5364 &mdash; package.json was bumped off-by-one in v3.16.6 and never corrected). Also ships the originally-intended v3.16.5 code changes: editing a message from a DM PiP now works correctly, and encrypted upload failure toasts show the specific error</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.10.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.9</span> &mdash; Fixed not appearing in the voice panel or sidebar while in a voice channel after a socket reconnect caused the server snapshot to race ahead of the rejoin re-registration</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.9.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.8</span> &mdash; Fixed phantom unread badge on the current channel after returning from background: incoming messages bumped the badge while the window was hidden even if the user was already at the bottom; badge now clears immediately on window focus when coupled to the bottom</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.8.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.7</span> &mdash; Images attached alongside a persona message now send as the persona instead of the real account. Persona badge was showing &ldquo;??&rdquo; prepended to the label; now shows the correct icon</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.7.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.6</span> &mdash; Added Unpin button to the pinned-message panel (visible to users with the <code>pin_message</code> permission or admin). Fixed webhook management being locked to admins despite a dedicated <code>manage_webhooks</code> permission; users with that permission can now create, list, delete, and toggle per-channel webhooks</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.6.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.5</span> &mdash; Fixed editing messages in the DM PiP doing nothing (server resolved the wrong channel; client now sends the channel code). Encrypted image upload failure toast now shows the specific error instead of always saying &ldquo;Encrypted image upload failed&rdquo;</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.5.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.4</span> &mdash; Unicode letters (umlauts, accented characters, non-Latin scripts) now allowed in channel names. Fixed video and audio files appearing in the Files tab of the media gallery instead of Videos/Audio</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.4.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.2</span> &mdash; Fixed CMD window closing on startup for Windows users past v3.15.1 (cmd.exe exits instead of returning from a <code>call :subroutine</code> inside an else-if compound block; restructured to use goto labels). Fixed published file themes not surviving a page refresh or applying on the login page (socket was never exposed for preference saving; theme-init.js now injects the CSS link immediately for file themes)</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.2.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.16.1</span> &mdash; Clicking Leave Voice now clears the voice panel and sidebar count immediately without waiting for the server broadcast; stale in-flight broadcasts can no longer re-add a user to the voice panel after they've left</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.16.1.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.8</span> &mdash; The fix that was already shipped, but actually shipped this time. Every cache-bust <code>?v=</code> string in app.html and app.js was pinned at 3.15.2/3.14.14 respectively, so browsers served stale client JS even on updated servers. None of the v3.15.3-3.15.7 client fixes (voice rejoin, sidebar sync, screen-share recovery, persona autocomplete) actually ran in any browser. Bumped them all to 3.15.8 to force a refresh</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.8.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.7</span> &mdash; Critical hotfix: <code>getUserAllRoles</code> was missing from the server's permission destructure, causing every voice user broadcast to throw a ReferenceError silently. Voice lists never updated after joins/leaves/mutes. Also fixed the saved server list being rejected with a 500 once it grew past ~50 servers</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.7.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.6</span> &mdash; Persona <code>::</code> autocomplete no longer appears in fullscreen DM view, and nicknames no longer override persona display names on messages</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.6.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.5</span> &mdash; Screen-share reliability overhaul: fixed silent <code>_renegotiate</code> throw when signaling state wasn't stable (caused audio-but-no-video), late-joiner screen tracks skipped if webcam was also on, <code>screen-share-started</code> was emitting after renegotiation instead of before, and added a recovery handshake so receivers automatically ask the sharer to re-offer if no video appears within ~3s</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.5.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.4</span> &mdash; Voice presence drift fix: sidebar and right voice panel now always in sync, reconnect after socket drop now correctly uses the rejoin path instead of a delayed plain join that left peers with dead connections</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.4.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.3</span> &mdash; Ghost voice entries pruned on connection snapshot and get-voice-counts so users who already left no longer show in the sidebar or voice panel</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.3.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.2</span> &mdash; Thread panel z-index fix, persona autocomplete hidden in DMs and threads, persona tooltip showing raw i18n key, double close button in media gallery, gallery button hidden in DMs, OpenSSL not recognized on Windows bat startup</div>
+                <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.2.zip">Download &rarr;</a>
+              </div>
+              <div class="version-item">
+                <div><span class="v-name">v3.15.1</span> &mdash; Polish pass on the Channel Media Gallery + Personas: persona prefix changed to <code>::Name your message</code> with autocomplete, <code>@PersonaName</code> mentions now resolve and ping the owner, fixed the bug where consecutive messages from different personas all stacked under the first persona's header, jump-to-message button on photo/video gallery tiles, video tiles open in an inline player instead of silently closing the gallery, image lightbox now sits above the gallery modal, top-bar header buttons follow the Colorful/Monochrome icon setting</div>
                 <a href="https://github.com/ancsemi/Haven/archive/refs/tags/v3.15.1.zip">Download &rarr;</a>
               </div>
               <div class="version-item">
@@ -1924,12 +2008,12 @@
       <!-- Desktop App Download Card -->
       <div class="download-card fade-in" style="margin-top: 32px; border-color: rgba(250, 166, 26, 0.25);">
         <div style="position: absolute; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, var(--accent-dim), var(--warning), var(--green)); box-shadow: 0 0 12px rgba(250, 166, 26, 0.3);"></div>
-        <h2>🖥️ Haven Desktop <span class="beta-badge-inline">BETA</span> &mdash; v1.4.11</h2>
+        <h2>🖥️ Haven Desktop <span class="beta-badge-inline">BETA</span> &mdash; v1.4.15</h2>
         <p class="download-version">Latest beta release &middot; Windows &amp; Linux &middot; Standalone installer</p>
 
         <div class="download-btn-group">
           <a href="https://github.com/ancsemi/Haven-Desktop/releases/latest" class="btn btn-primary download-main" style="background: var(--warning); box-shadow: 0 4px 24px rgba(250, 166, 26, 0.25), 0 0 0 1px rgba(250, 166, 26, 0.3);">
-            <span class="icon">⬇</span> Download Desktop v1.4.11
+            <span class="icon">⬇</span> Download Desktop v1.4.15
           </a>
           <div class="download-alt-links">
             <a href="https://github.com/ancsemi/Haven-Desktop" target="_blank">&#9965; View on GitHub</a>

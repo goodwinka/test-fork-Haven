@@ -4,6 +4,23 @@ export default {
 
 async _joinVoice() {
   if (!this.currentChannel) return;
+  // Spam-click guard: while a join is already in-flight (waiting for mic
+  // permissions, ICE config fetch, getUserMedia), repeated clicks used to
+  // queue a fresh voice.join() per press. After a server restart, every
+  // buffered click then fired against the freshly-reconnected socket and
+  // produced a flood of "Joined voice chat" toasts plus duplicate
+  // voice-join / voice-leave server events. The flag is cleared in a
+  // finally block below regardless of outcome.
+  if (this._joiningVoice) return;
+  // If the socket is currently disconnected (e.g. user is mashing the
+  // button during a server restart) refuse to start — emits would be
+  // buffered by socket.io and replayed N times on reconnect, producing
+  // the multi-toast / multi-join behaviour. The auto-rejoin code in the
+  // 'connect' handler will re-join voice automatically once we're back.
+  if (this.socket && this.socket.connected === false) {
+    this._showToast('Disconnected — try again once reconnected', 'error');
+    return;
+  }
   // Block voice join in text-only channels
   const _jvChk = this.channels.find(c => c.code === this.currentChannel);
   if (_jvChk && _jvChk.voice_enabled === 0) {
@@ -14,8 +31,18 @@ async _joinVoice() {
     this._showToast('You do not have permission to use voice', 'error');
     return;
   }
+  this._joiningVoice = true;
+  // Visually disable the join buttons while the async pipeline runs so a
+  // human can't fire 15 of them. We restore disabled=false in finally.
+  const _joinBtns = [
+    document.getElementById('voice-join-btn'),
+    document.getElementById('voice-join-mobile')
+  ].filter(Boolean);
+  _joinBtns.forEach(b => { b.disabled = true; });
+  let success = false;
+  try {
   // voice.join() auto-leaves old channel if connected
-  const success = await this.voice.join(this.currentChannel);
+  success = await this.voice.join(this.currentChannel);
   if (success) {
     const joinedCode = this.currentChannel;
     const joinedUser = {
@@ -26,7 +53,7 @@ async _joinVoice() {
       isDeafened: !!this.voice.isDeafened
     };
 
-    this._renderVoiceUsers([joinedUser]);
+    this._renderVoiceUsers([joinedUser], joinedCode);
     this.voiceCounts[joinedCode] = Math.max(1, this.voiceCounts[joinedCode] || 0);
     this.voiceChannelUsers[joinedCode] = [
       joinedUser,
@@ -65,9 +92,22 @@ async _joinVoice() {
   } else {
     this._showToast(t('voice.mic_error'), 'error');
   }
+  } finally {
+    this._joiningVoice = false;
+    // _updateVoiceButtons(true) already hides the join buttons after a
+    // successful join; restoring disabled=false here is for the failure
+    // path where the button stays visible.
+    _joinBtns.forEach(b => { b.disabled = false; });
+  }
 },
 
 _leaveVoice() {
+  // Capture the channel BEFORE voice.leave() nulls currentChannel so we
+  // can immediately clear the right voice panel and sidebar count for it.
+  // Don't wait for the server's voice-users-update broadcast — if we left
+  // the voice room before the broadcast fires, it may not reach us, and
+  // the panel would stay stuck showing us as a participant (#5347).
+  const leftCode = this.voice && this.voice.currentChannel;
   this.voice.leave();
   this._mutedByDeafen = false;
   this.notifications.playDirect('voice_leave');
@@ -75,6 +115,17 @@ _leaveVoice() {
   this._updateVoiceStatus(false);
   this._updateVoiceBar();
   this._hideMusicPanel();
+  // Optimistic local clear — mirrors the optimistic seed done in _joinVoice.
+  if (leftCode) {
+    delete this.voiceCounts[leftCode];
+    delete this.voiceChannelUsers[leftCode];
+    // If the right panel is currently showing this channel's voice users,
+    // empty it immediately so the user sees the leave reflected on click.
+    if (this.currentChannel === leftCode) {
+      this._renderVoiceUsers([], leftCode);
+    }
+    this._updateChannelVoiceIndicators();
+  }
   this._showToast(t('voice.left'), 'info');
 },
 

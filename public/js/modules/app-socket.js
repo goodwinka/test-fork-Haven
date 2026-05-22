@@ -88,7 +88,16 @@ _setupSocketListeners() {
     this._setLed('status-server-led', 'on');
     document.getElementById('status-server-text').textContent = 'Connected';
     this._lastConnectTime = Date.now();
+    this._authErrorStreak = 0;
     this._startPingMonitor();
+    // (#self-absent-voice-panel) Cancel any pending soft-leave from a brief
+    // socket blip — we reconnected before the 2 s deadline, so the voice
+    // session is still live and just needs to rebind its socketId on the
+    // server side via voice-rejoin (handled below).
+    if (this._voiceDisconnectTimer) {
+      clearTimeout(this._voiceDisconnectTimer);
+      this._voiceDisconnectTimer = null;
+    }
     // Re-join channel after reconnect (server lost our room membership)
     this.socket.emit('visibility-change', { visible: !document.hidden });
     this.socket.emit('get-channels');
@@ -248,13 +257,31 @@ _setupSocketListeners() {
     this._setLed('status-server-led', 'danger pulse');
     document.getElementById('status-server-text').textContent = 'Disconnected';
     document.getElementById('status-ping').textContent = '--';
-    // Mobile fix: if we were in voice when the socket dropped, clean up local
-    // voice state so the UI resets and auto-rejoin can work on reconnect.
+    // (#self-absent-voice-panel — Desktop "lost myself in voice" follow-up)
+    // Previously we _softLeave()'d the voice session immediately on every
+    // disconnect. Socket.io aggressively reconnects within a few hundred ms
+    // on transient network blips (especially Electron suspending the
+    // renderer momentarily), and the immediate teardown caused a cascade:
+    //   1. inVoice flips to false → defensive self-injection no longer
+    //      happens → voice panel shows everyone except us.
+    //   2. The reconnect path then has to rebuild the mic + AudioContext +
+    //      every RTCPeerConnection, which is heavy and prone to ICE failures
+    //      that other peers interpret as us "going stale".
+    // Defer the teardown by 2 s; if we reconnect first (the common case),
+    // skip the soft-leave entirely. The reconnect handler will issue
+    // `voice-rejoin` which rebinds our voice slot to the new socketId.
     if (this.voice && this.voice.inVoice) {
-      this.voice._softLeave();
-      this._updateVoiceButtons(false);
-      this._updateVoiceStatus(false);
-      this._updateVoiceBar();
+      if (this._voiceDisconnectTimer) clearTimeout(this._voiceDisconnectTimer);
+      this._voiceDisconnectTimer = setTimeout(() => {
+        this._voiceDisconnectTimer = null;
+        if (this.socket?.connected) return; // reconnected in time
+        if (!(this.voice && this.voice.inVoice)) return;
+        console.warn('[Voice] socket still down after 2s — soft-leaving voice');
+        this.voice._softLeave();
+        this._updateVoiceButtons(false);
+        this._updateVoiceStatus(false);
+        this._updateVoiceBar();
+      }, 2000);
     }
   });
 
@@ -262,10 +289,19 @@ _setupSocketListeners() {
     // Don't kick during password change — socket will reconnect with fresh token
     if (this._justChangedPassword) return;
     if (err.message === 'Invalid token' || err.message === 'Authentication required' || err.message === 'Session expired') {
-      localStorage.removeItem('haven_token');
-      localStorage.removeItem('haven_user');
-      localStorage.removeItem('haven_sync_key');
-      window.location.href = '/';
+      // Require multiple consecutive auth errors before nuking the session.
+      // A single transient error during a server restart (DB not yet ready,
+      // middleware racing init) should not log the user out and wipe their
+      // dismissals/sidebar state. The token only gets cleared if the server
+      // consistently rejects it.
+      this._authErrorStreak = (this._authErrorStreak || 0) + 1;
+      if (this._authErrorStreak >= 3) {
+        localStorage.removeItem('haven_token');
+        localStorage.removeItem('haven_user');
+        localStorage.removeItem('haven_sync_key');
+        window.location.href = '/';
+        return;
+      }
     }
     this._setLed('connection-led', 'danger');
     this._setLed('status-server-led', 'danger');
@@ -318,7 +354,16 @@ _setupSocketListeners() {
     // Seed client-side unreadCounts from server-reported values so the
     // desktop badge, tab title, and DM section badge stay in sync.
     // Only import counts for channels we haven't touched yet this session.
+    // Skip muted channels entirely — server has no knowledge of client-side
+    // mute state, so bot/webhook messages can leave stale unread counts on
+    // the server that would otherwise re-appear on every reconnect.
+    const _mutedChsAtSeed = new Set(JSON.parse(localStorage.getItem('haven_muted_channels') || '[]'));
     for (const ch of channels) {
+      if (_mutedChsAtSeed.has(ch.code)) {
+        // Pre-populate with 0 so future channels-list snapshots won't re-seed.
+        if (!(ch.code in this.unreadCounts)) this.unreadCounts[ch.code] = 0;
+        continue;
+      }
       if (!(ch.code in this.unreadCounts) && ch.unreadCount > 0) {
         this.unreadCounts[ch.code] = ch.unreadCount;
       }
@@ -802,8 +847,58 @@ _setupSocketListeners() {
     // user is either viewing the channel OR currently in voice on it.
     const isViewing = data.channelCode === this.currentChannel;
     const isInVoice = !!(this.voice && this.voice.inVoice && this.voice.currentChannel === data.channelCode);
+    // (#5347 v3.16.1) Defensively filter ourselves out of the user list
+    // when we're NOT in voice on this channel. Guards against an in-flight
+    // broadcast that was queued before our voice-leave was processed
+    // (or reaches us out of order) re-populating the panel with our own
+    // entry after we've clicked Leave.
+    let users = Array.isArray(data.users) ? data.users : [];
+    const myId = this.user && this.user.id;
+    if (myId && !isInVoice) {
+      users = users.filter(u => u.id !== myId);
+    }
+    // If we ARE in voice here but the server snapshot doesn't include us
+    // (race: request-voice-users arrived before voice-join was processed,
+    // or pruneStaleVoiceUsers briefly evicted our stale socket entry during
+    // a reconnect window before voice-rejoin re-registered us), inject our
+    // own entry from local state so the panel never shows us as absent
+    // while the voice bar says "Voice Connected". (#self-absent-voice-panel)
+    if (isInVoice && myId && !users.some(u => u.id === myId)) {
+      console.warn('[VoiceSelfHeal] Server roster missing self — injecting + emitting voice-rejoin', {
+        channel: data.channelCode,
+        rosterIds: users.map(u => u && u.id),
+        myId,
+        socketId: this.socket?.id,
+        socketConnected: !!this.socket?.connected
+      });
+      users = [
+        {
+          id: myId,
+          username: this.user.displayName || this.user.username,
+          roleColor: this.user.roleColor || null,
+          isMuted: !!(this.voice && this.voice.isMuted),
+          isDeafened: !!(this.voice && this.voice.isDeafened)
+        },
+        ...users
+      ];
+      // Self-heal: it's not enough to just patch the UI. If the server's
+      // roster doesn't include us, peers also don't have our updated
+      // socketId and our audio is silently broken until we manually leave
+      // and rejoin (the exact "I have to leave and rejoin, and that kicks
+      // everyone else" pattern reported repeatedly). Ask the server to
+      // rebind our voice slot via voice-rejoin, which broadcasts
+      // voice-user-left for any stale entry of us and re-adds us with the
+      // current socketId so peers re-negotiate cleanly. Throttle to once
+      // per ~3 s so we don't spam if the server's still missing us.
+      const now = Date.now();
+      if ((now - (this._lastVoiceSelfHealAt || 0)) > 3000 && this.socket?.connected) {
+        this._lastVoiceSelfHealAt = now;
+        console.warn('[Voice] Self missing from roster — emitting voice-rejoin');
+        this.socket.emit('voice-rejoin', { code: data.channelCode });
+      }
+    }
     if ((isViewing || isInVoice) && localStorage.getItem('haven_hide_voice_panel') !== 'true') {
-      this._renderVoiceUsers(data.users);
+      this._renderVoiceUsers(users, data.channelCode);
     }
     // (#5347 v3.15.4) Keep the left sidebar in sync with the right panel.
     // Previously the right panel was driven by voice-users-update and the
@@ -811,7 +906,7 @@ _setupSocketListeners() {
     // event arrived stale or out of order (the user saw both users on the
     // right but only themselves on the left). Both stores are now updated
     // from this single authoritative event so they cannot disagree.
-    const usersForSidebar = (data.users || []).map(u => ({
+    const usersForSidebar = users.map(u => ({
       id: u.id, username: u.username,
       isMuted: !!u.isMuted, isDeafened: !!u.isDeafened
     }));
@@ -835,9 +930,35 @@ _setupSocketListeners() {
   // voice-users-update is dropped. The voice-users-update handler is the
   // primary source of truth.
   this.socket.on('voice-count-update', (data) => {
-    if (data.count > 0) {
-      this.voiceCounts[data.code] = data.count;
-      this.voiceChannelUsers[data.code] = data.users || [];
+    // (#5347 v3.16.1) Same defensive self-filter as voice-users-update —
+    // if we're not actually in voice on this channel, strip ourselves
+    // from the broadcast so a stale message can't keep our own entry on
+    // the sidebar after we've left.
+    let usersList = Array.isArray(data.users) ? data.users : [];
+    let count = typeof data.count === 'number' ? data.count : usersList.length;
+    const myId = this.user && this.user.id;
+    const inThisVoice = !!(this.voice && this.voice.inVoice && this.voice.currentChannel === data.code);
+    if (myId && !inThisVoice && usersList.some(u => u.id === myId)) {
+      usersList = usersList.filter(u => u.id !== myId);
+      count = Math.max(0, count - 1);
+    }
+    // Symmetric self-inject: if we ARE in voice on this channel but the
+    // count snapshot doesn't include us (race after server restart /
+    // reconnect, briefly pruned-then-re-registered), add ourselves so the
+    // sidebar badge doesn't drop below the real number and the channel
+    // voice list under the indicator still shows us. (#missing-self-voice-panel)
+    if (myId && inThisVoice && !usersList.some(u => u.id === myId)) {
+      usersList = [{
+        id: myId,
+        username: (this.user.displayName || this.user.username),
+        isMuted: !!(this.voice && this.voice.isMuted),
+        isDeafened: !!(this.voice && this.voice.isDeafened)
+      }, ...usersList];
+      count = count + 1;
+    }
+    if (count > 0) {
+      this.voiceCounts[data.code] = count;
+      this.voiceChannelUsers[data.code] = usersList;
     } else {
       delete this.voiceCounts[data.code];
       delete this.voiceChannelUsers[data.code];
@@ -1115,6 +1236,22 @@ _setupSocketListeners() {
       if (this.currentChannel === data.oldCode) {
         this.currentChannel = data.newCode;
       }
+      // CRITICAL (#5347): if we're in voice on the rotated channel, the
+      // voice manager is still holding the OLD code as its currentChannel.
+      // Without updating it, every voice-rejoin / request-voice-users /
+      // voice-mute-state / etc. sent from this client uses the old code,
+      // the server can't find it (the DB row's code column was just
+      // updated), and we get the infinite "server says voice channel is
+      // gone" loop. Migrate every voice-side code reference too.
+      if (this.voice) {
+        if (this.voice.currentChannel === data.oldCode) {
+          this.voice.currentChannel = data.newCode;
+          console.log(`[Voice] channel code rotated mid-call: ${data.oldCode} -> ${data.newCode}`);
+        }
+        if (this.voice._softLeftChannel === data.oldCode) {
+          this.voice._softLeftChannel = data.newCode;
+        }
+      }
       this._renderChannels();
       // If currently viewing this channel, update the header code display
       if (this.currentChannel === data.newCode) {
@@ -1353,6 +1490,14 @@ _setupSocketListeners() {
       this._appendSystemMessage(`📌 ${t('header.messages.pinned_by', { name: data.pinnedBy })}`);
       this._markPinUnread?.(data.messageId);
       this._bumpPinIndicator?.(1);
+
+      // If the Pins PiP is open, silently re-fetch the updated pin list so the
+      // new pin appears without requiring the user to reopen anything.
+      const pinsPipPanel = document.getElementById('pins-pip-panel');
+      if (pinsPipPanel && pinsPipPanel.style.display !== 'none' && this._pinsPipChannelCode === this.currentChannel) {
+        this._pinsPipSilentRefresh = true;
+        this.socket.emit('get-pinned-messages', { code: this.currentChannel });
+      }
     }
   });
 
@@ -1368,7 +1513,7 @@ _setupSocketListeners() {
         const unpinBtn = msgEl.querySelector('[data-action="unpin"]');
         if (unpinBtn) { unpinBtn.dataset.action = 'pin'; unpinBtn.title = 'Pin'; }
       }
-      // Remove from pinned panel if it's open
+      // Remove from pinned sidebar panel if it's open
       const pinnedItem = document.querySelector(`#pinned-panel .pinned-item[data-msg-id="${data.messageId}"]`);
       if (pinnedItem) {
         pinnedItem.remove();
@@ -1378,6 +1523,19 @@ _setupSocketListeners() {
         if (remaining === 0) {
           document.getElementById('pinned-list').innerHTML = `<p class="muted-text" style="padding:12px">${t('pinned_panel.no_messages')}</p>`;
         }
+      }
+      // Remove from Pins PiP if it's open — same DOM surgery, no re-fetch needed
+      const pipItem = document.querySelector(`#pins-pip-list .pinned-item[data-msg-id="${data.messageId}"]`);
+      if (pipItem) {
+        pipItem.remove();
+        const pipList = document.getElementById('pins-pip-list');
+        if (pipList && !pipList.querySelector('.pinned-item')) {
+          pipList.innerHTML = `<p class="muted-text" style="padding:12px">${t('pinned_panel.no_messages')}</p>`;
+        }
+      }
+      // Keep the cached _lastPins in sync so a subsequent pop-out isn't stale
+      if (this._lastPins) {
+        this._lastPins = this._lastPins.filter(p => p.id !== data.messageId);
       }
       this._appendSystemMessage(`📌 ${t('header.messages.message_unpinned')}`);
       this._bumpPinIndicator?.(-1);
@@ -1618,6 +1776,56 @@ _setupSocketListeners() {
     const gameName = this._gamesRegistry?.find(g => g.id === data.game)?.name || data.game;
     this._showToast(`🏆 ${t('toasts.record_set', { user: this._getNickname(data.user_id, data.username), game: gameName, score: data.score })}`, 'success');
   });
+
+  // ── Voice roster watchdog ───────────────────────────────────────────
+  // The user has repeatedly reported that after a while in voice on the
+  // desktop client, they vanish from BOTH the right voice panel and the
+  // left sidebar voice indicator while peers still see them (and audio
+  // often still works). Every prior fix relied on the server pushing a
+  // fresh `voice-users-update` to trigger the self-heal in that handler,
+  // but if no one else mutes/joins/leaves nothing arrives and the bad
+  // state sticks until the user manually leaves and rejoins.
+  //
+  // This watchdog runs every 10 s while we're in voice and the socket
+  // is connected. It actively pulls a fresh roster from the server
+  // (`request-voice-users`), which causes the server to emit a private
+  // `voice-users-update` back to us. The existing self-heal in that
+  // handler (file `app-socket.js`, search "Self-heal") will then detect
+  // we're missing and emit `voice-rejoin` to rebind our voice slot.
+  //
+  // The interval is also a no-op when we're NOT in voice, so it costs
+  // one tiny socket emit every 10 s in the worst case.
+  if (!this._voiceRosterWatchdog) {
+    this._voiceRosterWatchdog = setInterval(() => {
+      try {
+        if (!this.socket?.connected) return;
+        if (!this.voice || !this.voice.inVoice) return;
+        const code = this.voice.currentChannel;
+        if (!code || !/^[a-f0-9]{8}$/i.test(code)) return;
+        // Check what we last rendered. If we already know we're missing,
+        // log loudly so it's easy to spot in DevTools when the glitch hits.
+        const myId = this.user && this.user.id;
+        const lastUsers = Array.isArray(this._lastVoiceUsers) ? this._lastVoiceUsers : [];
+        const selfPresentLocally = myId && lastUsers.some(u => u && u.id === myId);
+        if (myId && !selfPresentLocally) {
+          console.warn('[VoiceWatchdog] Self ABSENT from local roster while inVoice — polling server', {
+            channel: code,
+            inVoice: this.voice.inVoice,
+            socketConnected: !!this.socket?.connected,
+            lastUserCount: lastUsers.length
+          });
+        } else {
+          // Quiet trace, useful when the user grabs a console dump after a glitch.
+          if (window.HAVEN_DEBUG_VOICE) {
+            console.debug('[VoiceWatchdog] tick', { channel: code, lastUserCount: lastUsers.length });
+          }
+        }
+        this.socket.emit('request-voice-users', { code, iAmInVoice: true });
+      } catch (e) {
+        console.warn('[VoiceWatchdog] tick failed:', e);
+      }
+    }, 10000);
+  }
 },
 
 };

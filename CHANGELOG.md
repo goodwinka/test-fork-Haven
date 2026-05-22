@@ -11,6 +11,173 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Haven uses [Sema
 
 ---
 
+## [Unreleased]
+
+---
+
+## [3.16.15] — 2026-05-20
+
+### Fixed
+- **Version display regression from v3.16.14 (#5369).** The v3.16.14 release tag was created without bumping `package.json`, so servers running v3.16.14 reported version v3.16.13 via `GET /api/version` and the `session-info` socket event. Corrected in this release.
+- **Voice chat: ACTUAL ROOT CAUSE of the recurring self-vanish bug (#5347) — channel code rotation desync.** The new server-side `[VoiceDiag]` logs from the previous patch lit it up immediately: every time the bug hit, the server's auto-rotation timer had just rotated the channel's code (e.g. `95aa65d9 → aaeb3979`), but the voice clients still in the channel kept emitting `voice-rejoin` / `request-voice-users` / `voice-mute-state` with the OLD code. The server couldn't find the old code in the DB (because it was just updated), and the existing `channel-code-rotated` client handler only migrated `this.currentChannel` — it never touched `this.voice.currentChannel`. So every voice client was stuck holding a dead reference, the watchdog/self-heal loop ran forever, peers couldn't connect, and "everyone has to leave and rejoin to recover" was the only escape.
+  - **Client now migrates voice-side state on rotation** (`this.voice.currentChannel` and `this.voice._softLeftChannel`), not just the text-channel state.
+  - **Server now migrates the voice socket-room AND broadcasts the rotation event to the voice room too**, so users in voice but not viewing the text channel still receive the update.
+  - **`pendingVoiceLeave` grace-period keys are rekeyed to the new code** so an in-flight disconnect mid-rotation can still be cancelled correctly.
+- **Voice chat: null `audioCtx.currentTime` crash on leave (`voice.js:1829`).** The noise-gate `setInterval` and its hold-timeout could fire once after `leave()` nulled `this.audioCtx`, throwing `Cannot read properties of null (reading 'currentTime')`. Added guards so both paths bail safely if the audio context is gone.
+
+---
+
+## [3.16.14] — 2026-05-19
+
+### Fixed
+- **Voice chat: recurring "I vanished from my own voice panel even though I can still talk" glitch (#5347, again).** Previous patches added a soft-leave deferral and a passive self-inject in `voice-users-update`, but neither fixed the underlying cause: the server's `disconnect` handler was eagerly removing the user from `voiceUsers` on every blip and broadcasting `voice-user-left` to peers. On the common transient case (Electron renderer briefly suspends, NAT rebind, brief Wi-Fi hiccup) the user reconnected within a second or two, but by then peers had already torn down their `RTCPeerConnection`s — or worse, the server's roster was empty and the rejoin never fully repaired the local UI, so the user kept seeing only other people in the voice panel while their own mic still worked. This release stops the bleeding at the source:
+  - **Server-side 4 s grace period before evicting on disconnect.** Instead of immediately calling `handleVoiceLeave`, the server now schedules eviction 4 seconds out. If the user's voice slot is reclaimed by a `voice-join` or `voice-rejoin` from a new socket before the timer fires, the eviction is cancelled, the `voiceUsers` entry is rebound to the new socketId, and peers are never told `voice-user-left` — meaning their `RTCPeerConnection`s stay live and audio is uninterrupted across the blip.
+  - **Fast-path rejoin that skips peer renegotiation.** When the grace-period fast-path triggers, the server sends `voice-existing-users` with a new `skipRenegotiate` flag so the rejoining client does NOT rebuild fresh `RTCPeerConnection`s on top of working ones (which would have killed audio for no reason).
+  - **Client-side voice roster watchdog.** Every 10 seconds, if we're in voice and the socket is connected, the client polls the server's authoritative roster with an `iAmInVoice: true` hint. If the server confirms we're missing despite claiming to be in voice, the existing self-heal path fires `voice-rejoin` automatically — so even if some edge case still leaves us in a desynced state, it self-corrects within 10 s instead of sticking forever until manual leave+rejoin.
+  - Verbose `[VoiceDiag]` / `[VoiceWatchdog]` / `[VoiceSelfHeal]` server + client logs at every critical transition so any remaining edge case is trivially diagnosable from a single screenshot of the console.
+
+---
+
+## [3.16.13] — 2026-05-17
+
+### Added
+- **Channel and sub-channel composers are now drag-resizable (#5327).** Channel text areas previously auto-grew up to a hard cap of 5 lines and could not be enlarged further, which made composing longer multi-paragraph messages painful. A vertical drag handle (the same UI shipped for PiP DMs in v3.16.x) now sits at the top of the message-input area for channels and threads: grab it and drag up to expand the textarea up to 60 % of the viewport, drag back down to collapse. The dragged height is sticky across keystrokes and message sends — internally, the manual height is written as `min-height` inline on the textarea, which overrides the auto-grow's CSS `max-height` cap until the user manually shrinks it again.
+- **Sub-channels inherit parent channel role access on creation (#5328).** When a sub-channel is created under a parent channel that has role-based access configured (e.g. a `@Mods` role granted on promote), the new sub-channel automatically copies the parent's `role_channel_access` rows and grants membership to current holders of any role marked `grant_on_promote`. Previously, every new sub-channel started with no role access at all, so admins had to re-add every role to every sub-channel by hand. Existing sub-channels are not touched (so any per-sub customisation you've already set up is preserved); the inheritance only runs at creation time, and per-sub access can still be customised afterwards in Channel Settings.
+
+### Fixed
+- **Voice chat: "I lose myself in the right panel after a while and have to leave + rejoin, which kicks everyone else out."** Two converging issues were driving the symptom on long-lived sessions:
+  - **Transient socket blips were tearing down the entire voice session.** The `disconnect` handler used to immediately call `_softLeave()` — flipping `inVoice = false`, killing the mic stream and every `RTCPeerConnection` — on every dropped frame from the socket. Socket.io reconnects within a few hundred milliseconds on most blips (Electron renderer momentarily suspending, brief Wi-Fi hiccup, server-side keepalive miss), but by the time we reconnected the voice session was already in pieces and the panel could no longer self-inject us because `inVoice` was false. The teardown is now deferred by 2 seconds; if the socket reconnects in time (the common case), the soft-leave is cancelled and `voice-rejoin` rebinds our voice slot to the new socketId without rebuilding the mic or peers.
+  - **When the panel did still drop us, we'd silently stay broken until a manual leave+rejoin.** The existing defensive self-injection patched the visible roster but never re-registered us with the server, so peers still had our stale socketId and our audio was dead until we manually toggled. The `voice-users-update` handler now also emits `voice-rejoin` (throttled to once per 3 s) whenever it has to inject self into the roster, so the server cleans up any stale entry of us and re-broadcasts a fresh roster to peers automatically.
+
+---
+
+## [3.16.12] — 2026-05-16
+
+### Fixed
+- **Voice chat: missing-self in the right panel after a server restart / reconnect race.** When the server briefly didn't have us in the voice roster at the moment a `voice-users-update` was rendered (re-render from a stale `_lastVoiceUsers` cache, a `request-voice-users` reply that arrived before our `voice-join` was processed, or a `voice-count-update` snapshot taken during a prune-and-re-register window), the right voice panel could show every other participant but omit ourselves while the status bar still said "Voice Connected". `_renderVoiceUsers()` now belt-and-suspenders injects the local user when we're in voice on the channel being rendered, tracked via a new `_lastVoiceUsersChannel` so the injection is correctly scoped (no false positives when viewing one channel while voice-connected to another). The `voice-count-update` handler does the same for the sidebar badge so the count never undershoots.
+- **Voice chat: stale roster after a server reboot.** `request-voice-users` server-side now prunes stale voice entries before responding, and re-broadcasts the fresh roster to everyone in the room if any ghosts were removed. Previously, clients that reconnected after a server restart could momentarily see the pre-restart roster (or duplicate entries while peers were still reconnecting) until the next broadcast tick.
+- **"Start Voice did nothing, I clicked it 15 times and got 15 toasts at once."** Three converging bugs caused the multi-press / multi-toast behaviour during a server outage:
+  - `_fetchIceServers()` had no timeout, so when the server was unreachable the fetch hung until the network stack gave up, leaving `voice.join()` in-flight for tens of seconds while the user mashed the button. It now aborts after 4 seconds and falls back to the default STUN-only ICE config.
+  - The Start Voice button accepted re-entrant presses while a join was in-flight. The first click would buffer a `voice-join` socket emit (socket.io queues emits while disconnected) and every subsequent click would buffer another, plus a stray `voice-leave` from the in-flight `voice.leave()` called at the top of `voice.join()`. All of them fired against the freshly-reconnected socket once the server came back, producing the toast flood and duplicate session churn. `_joinVoice()` now sets an `_joiningVoice` flag, disables the join buttons for the duration, and ignores re-entrant presses until the join resolves.
+  - `voice.join()` no longer attempts to emit `voice-join` while the socket is disconnected — it bails immediately and returns `false`, so a click during the outage produces a clear "Disconnected" toast instead of silently queueing work. The `connect` handler still auto-rejoins voice from the persisted `haven_voice_channel` once the socket is back, so users don't need to click anything.
+
+---
+
+## [3.16.11] — 2026-05-16
+
+### Fixed
+- **Removed servers no longer reappear after a restart.** `ServerManager.add()` now honors the local "removed" set on bootstrap and sync paths — only an explicit click on **Add Server** in the modal can resurrect a previously-removed entry. Previously, every code path that called `add()` (Desktop history merge, Sync Servers, encrypted-backup pull) would silently delete the URL from the removed set and re-add it, so deleting a server in Manage Servers only stuck for one session.
+- **Transient server restarts no longer log users out.** The socket `connect_error` handler now requires three consecutive auth errors before clearing the token and bouncing to the login page, instead of nuking the session on the first error. A single transient `Authentication required` / `Session expired` during a server restart (DB not yet ready, middleware racing init) is treated as recoverable. The streak resets on a successful connect.
+
+---
+
+## [3.16.10] — 2026-05-15
+
+### Fixed
+- **Displayed server version was stuck at `v3.16.5` even after updating (#5364).** The `v3.16.6` commit bumped `package.json` to `3.16.5` (off-by-one), and none of the subsequent v3.16.7 / v3.16.8 / v3.16.9 commits actually bumped the version field. Because both `/api/version` and the `session-info` socket emit read directly from `package.json`, every installation since v3.16.6 has reported itself as `v3.16.5` in the status bar regardless of which release was actually deployed — which also kept the in-app update banner flagging an update that users had already installed. Fixed by bumping `package.json` to `3.16.10` and bumping all `?v=` cache-bust query strings in `app.html` so the client also picks up the freshly versioned assets.
+- **Belatedly shipping the originally-intended v3.16.5 fixes.** The `## [3.16.5]` changelog entry described an `edit-message` DM-PiP fix and a more detailed encrypted-upload error toast, but the corresponding code changes (`public/js/modules/app-admin.js`, `public/js/modules/app-utilities.js`, `src/socketHandlers/messages.js`) were never committed and only existed in the working tree. They are now committed as part of this release. Editing a message from a DM PiP while focused on a different server channel now resolves the correct channel server-side, and encrypted DM upload failures now show the underlying error message in the toast.
+
+---
+
+## [3.16.9] — 2026-05-15
+
+### Fixed
+- **You don't appear in the voice panel or sidebar while in voice.** After a socket reconnect (or any event that triggered a server-side voice broadcast during the rejoin window), `pruneStaleVoiceUsers` could briefly remove your entry before `voice-rejoin` re-registered the new socket. The resulting `voice-users-update` snapshot would contain everyone else but not you. Since `isInVoice` was still `true`, the self-filter didn't run, but your entry was simply absent from the server's payload, and the panel would stick showing only other participants. The fix: when we are confirmed to be in voice on a channel but our own entry is missing from the server snapshot, we inject it from local state before rendering.
+
+---
+
+## [3.16.8] — 2026-05-15
+
+### Fixed
+- **Phantom unread badge on current channel after returning from background.** When the app was backgrounded (alt-tabbed, minimised, or the BrowserView was hidden in Desktop's multi-server switcher) while the user was already at the bottom of a channel, incoming messages bumped the sidebar unread badge even though the user was actively reading that channel. The badge-clearing code only fires when a *new* message arrives while the page is visible, so if no further messages arrived the stale badge was stuck permanently. The fix clears the badge (and syncs `mark-read` to the server) immediately when the window/tab regains visibility and the user is still coupled to the bottom of the current channel.
+
+---
+
+## [3.16.7] — 2026-05-15
+
+### Fixed
+- **Images attached alongside a persona message now send as the persona.** Previously, when a user typed `::PersonaName message` with an image queued, the text arrived attributed to the persona but the image was a separate bare message from the real account. The image send now inherits the persona prefix, so both the text and any bundled images show the same persona.
+- **Persona badge showed `??` instead of an icon.** The `🎭` persona label badge was rendering with a literal `??` placeholder (a forgotten CSS `::before` value) prepended to the word "persona". It now shows a 🎭 icon.
+
+---
+
+## [3.16.6] — 2026-05-15
+
+### Added
+- **Unpin from pinned-message panel.** Users with the `pin_message` permission (or admin) now see an **Unpin** button on every entry in the pinned-messages panel. Clicking it shows an "are you sure?" confirmation before removing the pin — no more having to scroll back to the original message, especially useful for encrypted DMs where that scroll is very far.
+
+### Fixed
+- **Webhook permission was admin-only despite a dedicated `manage_webhooks` role permission.** The `create-webhook`, `get-webhooks`, `delete-webhook`, and `toggle-webhook` socket handlers all rejected non-admin users even when they had `manage_webhooks` granted through a role. Now those handlers (and the per-channel Webhooks entry in the channel context menu) are accessible to any user with `manage_webhooks`. The bot-manager modal in Admin Settings remains admin-only.
+
+---
+
+## [3.16.5] — 2026-05-14
+
+### Fixed
+- **Editing messages in DM PiP did nothing.** The server's `edit-message` handler always resolved the target channel from `socket.currentChannel`. When a user was viewing a server channel but had a DM open in the floating PiP panel, `socket.currentChannel` pointed to the server channel — so the message lookup failed silently, the client's optimistic edit was rolled back, and nothing happened. The handler now accepts an optional `channelCode` from the client and falls back to `socket.currentChannel` (same pattern used by `delete-message`). The client now sends `channelCode` when editing from the PiP panel.
+- **Encrypted image upload failure toast now shows the specific error.** When uploading an image in an E2E DM fails, the "Encrypted image upload failed" toast now includes the underlying error message (e.g. "Upload failed (403)" or "E2E not ready") to help diagnose the cause. Both the image path (`_uploadImage`) and the general file path (`_maybeUploadEncryptedDmFile`) are updated.
+
+---
+
+## [3.16.4] — 2026-05-14
+
+### Fixed
+- **Unicode letters blocked in channel names (#5362).** The channel-name validation regex used `\w` which is ASCII-only even with the `u` flag in JavaScript. Umlauts (ä, ö, ü), accented letters, and other non-ASCII characters were rejected with "invalid characters." Added `\p{L}\p{M}` (Unicode letter and combining-mark categories) to the regex, so any language's script is now accepted.
+
+---
+
+## [3.16.3] — 2026-05-14
+
+### Fixed
+- **Video/audio files not categorized in media gallery (#5361).** File attachments are stored in message content as `[file:name](url|size)`. The `|size` suffix was part of the URL field, causing the extension regex to fail (e.g. `.mp4|2.5` didn't match `\.mp4(?:$|[?#])`). As a result, all video and audio files fell into the "files" tab instead of "videos" or "audios." Fixed by updating the file-link regex to stop at `|`, and stripping the `|size` suffix from bare upload URLs before extension testing.
+
+---
+
+## [3.16.2] — 2026-05-13
+
+### Fixed
+- **[Windows] Start Haven.bat crashes CMD past v3.15.1 (#5358).** The SSL cert-generation block was restructured to use `goto` labels instead of a compound `else-if` + `call :subroutine`. On some Windows versions, returning from a `call` subroutine nested inside an `else-if` compound block causes cmd.exe to exit the script rather than return to the caller, closing the CMD window without any error output. The new `goto`-based flow keeps `%OPENSSL_CMD%` as a plain statement (outside any compound block) so it expands correctly at execution time without needing a subroutine at all, preserving the fix from #5351.
+- **Published/custom theme not retained after page refresh (#5359).** Two root causes: (1) `window.havenSocket` was never assigned, so when a user clicked a published file theme button, the `set-preference` socket event was silently dropped and the server never stored the preference. On next load the server sent back an empty theme preference and the client fell through to the server's default theme, overwriting the `file:xxx` value in localStorage. Fixed by assigning `window.havenSocket` in `app.js` after the socket is created. (2) `theme-init.js` only set `data-theme` on early load; for `file:` themes it did not inject the CSS `<link>`, causing a flash of unstyled content on app.html refresh and no theme at all on the login page (where plugin-loader never runs). Fixed by injecting the `<link>` tag in `theme-init.js` when the saved theme is a `file:` theme, using `data-theme="haven"` as a stable base — matching what `applyFileTheme()` does — so the file theme applies immediately on both the app and login pages.
+
+---
+
+## [3.16.1] — 2026-05-12
+
+### Fixed
+- Voice presence: clicking Leave Voice now clears the right voice panel and the channel sidebar count immediately, without waiting for the server's `voice-users-update` broadcast to come back. After the server emit, the leaver was no longer in the `voice:<code>` room, so the broadcast could miss them and the panel stayed showing them as a participant. Mirrors the optimistic update already done on join. (#5347)
+- Voice presence: defensively filter the local user out of incoming `voice-users-update` and `voice-count-update` payloads when not actually in voice on that channel, so a stale or in-flight broadcast can't re-populate the panel/sidebar after a leave.
+
+---
+
+## [3.15.8] — 2026-05-12
+
+The one nobody saw coming. The reason all the v3.15.3-3.15.7 voice fixes appeared not to work for users is that **none of the client-side changes since v3.14.14 were actually being delivered to browsers.** The `<script>` cache-bust strings in app.html were pinned at `?v=3.15.2` and the ES-module imports inside app.js (which load app-voice.js, app-socket.js, app-users.js, etc.) were pinned at `?v=3.14.14`. Browsers happily kept serving the cached pre-3.15.4 client JS even on a fully-updated 3.15.7 server. So everything fixed since v3.14.14 was running on the server but missing from the client. The screen-share renegotiation work (3.15.5), the sidebar/voice-panel sync (3.15.4), the `_softLeave` rejoin path (3.15.4), the persona autocomplete fixes (3.15.6) — none of it ever ran in any browser. Apologies for the runaround on this one. (#5347)
+
+### Fixed
+- Bumped every `?v=` cache-bust string in `public/app.html` (3.15.2 → 3.15.8) and `public/js/app.js` (3.14.14 → 3.15.8). Forces every browser to fetch the post-3.14.14 client JS that the previous releases shipped to the server but never to the user.
+
+---
+
+## [3.15.7] — 2026-05-09
+
+Hotfix on top of 3.15.4-3.15.6 (#5347). The voice presence work in 3.15.4 added a `getUserAllRoles` lookup inside `broadcastVoiceUsers` but the helper was never destructured from `createPermissions(db)`, so every voice broadcast (join, leave, mute, etc.) was throwing `ReferenceError: getUserAllRoles is not defined`. The error happened inside an async socket handler, so the server stayed up but the broadcast never completed: clients kept showing whoever was last successfully broadcast, ghost users persisted after leaves, and rejoiners didn't appear in the roster until everyone left and rejoined. This is the actual cause of the long-standing "voice list disagrees with reality" symptom, not the things 3.15.3-3.15.5 patched around it.
+
+### Fixed
+- **`ReferenceError: getUserAllRoles is not defined` on every voice broadcast (#5347).** Added the missing destructure in `setupSocketHandlers` and re-exported it on the shared ctx so domain modules can use it too. Voice user broadcasts now actually complete.
+- **Saved server list (`PUT /api/auth/user-servers`) rejected as `PayloadTooLargeError` once the list got past ~50 servers.** The per-route `express.json({ limit: '96kb' })` in `auth.js` was being preempted by the global 16kb parser registered in `server.js`. Bumped the global json/urlencoded limit to 128kb. Individual routes still set their own tighter limits where appropriate.
+
+---
+
+## [3.15.6] — 2026-05-09
+
+Follow-up fixes for personas (#5353).
+
+### Fixed
+- **Persona `::` autocomplete appeared in fullscreen DM view.** The PiP input already suppressed it, but the main `#message-input` (used when you open a DM as a full channel view) still ran `_checkPersonaTrigger`. Added a guard at the top of that function that bails out whenever the active channel is a DM.
+- **Nickname set for a user overrode the persona name on their messages.** Message rendering called `_getNickname(msg.user_id, ...)` unconditionally, so any local nickname for the real account replaced the persona's display name. Persona messages now use `msg.username` (the persona name) directly, bypassing the nickname lookup.
+
+---
+
 ## [3.15.5] — 2026-05-09
 
 Long-standing screen-share reliability fixes. The flow had multiple silent-failure paths that left receivers with audio but no video (or no tile at all). This run unblocks the most common ones with a recovery handshake.

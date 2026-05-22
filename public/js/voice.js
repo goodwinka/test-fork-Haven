@@ -85,10 +85,24 @@ class VoiceManager {
     try {
       const token = localStorage.getItem('haven_token');
       if (!token) return;
-      const res = await fetch('/api/ice-servers', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
+      // 4s hard cap — if the server is restarting or unreachable, we
+      // fall back to the default STUN-only config rather than hanging
+      // join() indefinitely. Without the timeout, a click on Start Voice
+      // during a server reboot stays in-flight while the user mashes the
+      // button, queuing up duplicate voice-join emits that all fire once
+      // the socket reconnects (#voice-spam-click).
+      const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), 4000) : null;
+      let res;
+      try {
+        res = await fetch('/api/ice-servers', {
+          headers: { 'Authorization': `Bearer ${token}` },
+          signal: ctrl ? ctrl.signal : undefined
+        });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      if (res && res.ok) {
         const data = await res.json();
         if (data.iceServers && data.iceServers.length) {
           this.rtcConfig.iceServers = data.iceServers;
@@ -96,17 +110,36 @@ class VoiceManager {
         }
       }
     } catch (err) {
-      console.warn('Could not fetch ICE servers, using defaults:', err.message);
+      console.warn('Could not fetch ICE servers, using defaults:', err && err.message);
     }
   }
 
   // ── Socket event listeners ──────────────────────────────
 
   _setupSocketListeners() {
+    // Server signalled the voice channel no longer exists (DB row gone,
+    // or we were never a member). Stop the watchdog/self-heal loop by
+    // fully tearing down local voice state so the client stops thinking
+    // it's in voice on a dead channel.
+    this.socket.on('voice-channel-gone', (data) => {
+      if (!this.inVoice) return;
+      if (this.currentChannel && data && data.code && data.code !== this.currentChannel) return;
+      console.warn('[Voice] Server says voice channel is gone — leaving locally:', data && data.code);
+      try { this.leave(); } catch (e) { console.warn('[Voice] leave() during voice-channel-gone failed:', e); }
+    });
+
     // We just joined: create peer connections + send offers to all existing users
     this.socket.on('voice-existing-users', async (data) => {
       // Apply audio bitrate cap from channel settings
       this.audioBitrate = data.voiceBitrate || 0;
+      // Fast-path: server told us this is a transient rejoin and our
+      // existing RTCPeerConnections are still live. Skip creating fresh
+      // peers — that would tear down working audio for no reason. See
+      // [VoiceDiag] fast-path in src/socketHandlers/voice.js.
+      if (data.skipRenegotiate) {
+        console.log('[Voice] voice-existing-users with skipRenegotiate — keeping existing peers');
+        return;
+      }
       for (const user of data.users) {
         await this._createPeer(user.id, user.username, true);
       }
@@ -434,6 +467,17 @@ class VoiceManager {
     try {
       const preservedMuteState = this.isMuted;
       const preservedDeafenState = this.isDeafened;
+
+      // Don't attempt to join while the socket is disconnected. The
+      // emit() would otherwise be buffered by socket.io and flushed on
+      // reconnect, producing duplicate sessions if the user clicked
+      // Start Voice multiple times during the outage. The 'connect'
+      // handler in app-socket.js auto-rejoins voice via the persisted
+      // localStorage channel once the socket comes back. (#voice-spam-click)
+      if (this.socket && this.socket.connected === false) {
+        console.warn('[Voice] join() ignored — socket disconnected');
+        return false;
+      }
 
       // Leave existing voice channel if connected elsewhere
       if (this.inVoice) this.leave();
@@ -1810,6 +1854,9 @@ class VoiceManager {
       // Expose current level for UI meter (0-100 scale, capped)
       this.currentMicLevel = Math.min(100, (avg / 50) * 100);
 
+      // Guard against audioCtx being torn down between ticks (leave()
+      // nulls it but the interval can still fire once before we clear it).
+      if (!this.audioCtx) return;
       if (avg > threshold) {
         // Signal is above threshold — confirm it sustains before opening
         aboveCount++;
@@ -1823,6 +1870,7 @@ class VoiceManager {
         if (gateOpen && !holdTimeout) {
           // Signal dropped below threshold — start hold timer before closing
           holdTimeout = setTimeout(() => {
+            if (!this.audioCtx) return;
             gain.gain.setTargetAtTime(0, this.audioCtx.currentTime, RELEASE);
             gateOpen = false;
             holdTimeout = null;

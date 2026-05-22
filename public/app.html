@@ -10,8 +10,8 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <title>Haven</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48cG9seWdvbiBwb2ludHM9IjUwLDMgOTMsMjggOTMsNzIgNTAsOTcgNyw3MiA3LDI4IiBmaWxsPSJub25lIiBzdHJva2U9IiM2YjRmZGIiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjx0ZXh0IHg9IjUwIiB5PSI2MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkFyaWFsLEhlbHZldGljYSxzYW5zLXNlcmlmIiBmb250LXdlaWdodD0iYm9sZCIgZm9udC1zaXplPSIzOCIgZmlsbD0iIzZiNGZkYiIgb3BhY2l0eT0iMC45NSI+SDwvdGV4dD48L3N2Zz4=">
-  <link rel="stylesheet" href="/css/style.css?v=3.15.2">
-  <script src="/js/theme-init.js?v=3.15.2"></script>
+  <link rel="stylesheet" href="/css/style.css?v=3.16.15">
+  <script src="/js/theme-init.js?v=3.16.15"></script>
 </head>
 <body>
 
@@ -101,17 +101,17 @@
                        data-i18n-placeholder="app.sidebar.channel_name_placeholder" placeholder="Channel name..." maxlength="50">
                 <button id="create-channel-btn" class="btn-sm btn-accent">+</button>
               </div>
-              <label class="checkbox-row" style="margin:6px 0 2px;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;opacity:0.8">
+              <label class="checkbox-row" title="Invite-only" style="margin:6px 0 2px;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;opacity:0.8">
                 <input type="checkbox" id="new-channel-private" style="width:14px;height:14px">
-                <span>🔒 <span data-i18n="app.sidebar.private_channel">Private</span></span> <span style="opacity:0.5;font-size:0.75rem" data-i18n="app.sidebar.private_hint">(invite-only)</span>
+                <span>🔒 <span data-i18n="app.sidebar.private_channel">Private</span></span>
               </label>
-              <label class="checkbox-row" style="margin:2px 0;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;opacity:0.8">
+              <label class="checkbox-row" title="Auto-deletes when empty" style="margin:2px 0;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;opacity:0.8">
                 <input type="checkbox" id="new-channel-temporary" style="width:14px;height:14px">
-                <span>⏱️ <span data-i18n="app.sidebar.temporary_channel">Temporary</span></span> <span style="opacity:0.5;font-size:0.75rem" data-i18n="app.sidebar.temporary_hint">(auto-delete)</span>
+                <span>⏱️ <span data-i18n="app.sidebar.temporary_channel">Temporary</span></span>
               </label>
-              <label class="checkbox-row" id="new-channel-add-all-row" style="margin:2px 0;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;opacity:0.8">
+              <label class="checkbox-row" id="new-channel-add-all-row" title="Everyone joins automatically" style="margin:2px 0;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;opacity:0.8">
                 <input type="checkbox" id="new-channel-add-all" style="width:14px;height:14px">
-                <span>👥 <span data-i18n="app.sidebar.add_all_members">Add all server members</span></span> <span style="opacity:0.5;font-size:0.75rem" data-i18n="app.sidebar.add_all_hint">(everyone joins automatically)</span>
+                <span>👥 <span data-i18n="app.sidebar.add_all_members">Add all members</span></span>
               </label>
               <div id="temp-channel-duration-row" style="display:none;margin:4px 0 2px;padding-left:22px">
                 <div class="input-row" style="gap:6px;align-items:center">
@@ -447,7 +447,11 @@
           <div id="pinned-panel" class="pinned-panel" style="display:none">
             <div class="pinned-panel-header">
               <span id="pinned-count">📌 <span data-i18n="header.pinned_count">Pinned Messages</span></span>
-              <button id="pinned-close" class="icon-btn small">&times;</button>
+              <div class="pinned-panel-actions">
+                <button id="pinned-fullscreen-btn" class="icon-btn small" title="Open fullscreen">⤢</button>
+                <button id="pinned-popup-btn" class="icon-btn small" title="Pop out to floating panel">⧉</button>
+                <button id="pinned-close" class="icon-btn small">&times;</button>
+              </div>
             </div>
             <div id="pinned-list" class="pinned-list"></div>
           </div>
@@ -471,6 +475,7 @@
             <span class="upload-progress-text" id="upload-progress-text" data-i18n="header.uploading">Uploading...</span>
           </div>
           <div id="message-input-area" class="message-input-area">
+            <div class="pip-input-resizer" aria-hidden="true"></div>
             <div class="input-actions-box">
               <button id="upload-btn" class="btn-upload" data-i18n-title="media.upload_file_title" title="Upload File">
                 <svg class="upload-icon-default" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -732,6 +737,18 @@
   </div>
 
   <!-- Thread Panel (slides in from right) -->
+  <!-- Pinned Messages PiP floating panel (draggable overlay) -->
+  <div id="pins-pip-panel" class="pins-pip-panel" style="display:none">
+    <div class="pins-pip-header">
+      <span class="pins-pip-icon" aria-hidden="true">📌</span>
+      <span id="pins-pip-title" class="pins-pip-title">Pinned Messages</span>
+      <div class="pins-pip-spacer"></div>
+      <button id="pins-pip-fullscreen" class="icon-btn small" title="Toggle fullscreen">⤢</button>
+      <button id="pins-pip-popin" class="icon-btn small" title="Pop back in to sidebar">⧈</button>
+      <button id="pins-pip-close" class="icon-btn small" title="Close">&times;</button>
+    </div>
+    <div id="pins-pip-list" class="pins-pip-list pinned-list"></div>
+  </div>
   <!-- DM PiP floating panel (overlay; doesn't switch the active channel) -->
   <div id="dm-pip-panel" class="dm-pip-panel" style="display:none">
     <div id="dm-pip-banner" class="dm-pip-banner" aria-hidden="true"></div>
@@ -3205,14 +3222,14 @@
       </div>
     </div>
   </div>
-  <script src="/js/theme.js?v=3.15.2"></script>
-  <script src="/js/notifications.js?v=3.15.2"></script>
-  <script src="/js/servers.js?v=3.15.2"></script>
-  <script src="/js/voice.js?v=3.15.2"></script>
-  <script src="/js/modmode.js?v=3.15.2"></script>
-  <script src="/js/e2e.js?v=3.15.2"></script>
-  <script type="module" src="/js/app.js?v=3.15.2"></script>
-  <script src="/js/plugin-loader.js?v=3.15.2"></script>
-  <script src="/js/modules/stream-debug.js?v=3.15.2"></script>
+  <script src="/js/theme.js?v=3.16.15"></script>
+  <script src="/js/notifications.js?v=3.16.15"></script>
+  <script src="/js/servers.js?v=3.16.15"></script>
+  <script src="/js/voice.js?v=3.16.15"></script>
+  <script src="/js/modmode.js?v=3.16.15"></script>
+  <script src="/js/e2e.js?v=3.16.15"></script>
+  <script type="module" src="/js/app.js?v=3.16.15"></script>
+  <script src="/js/plugin-loader.js?v=3.16.15"></script>
+  <script src="/js/modules/stream-debug.js?v=3.16.15"></script>
 </body>
 </html>

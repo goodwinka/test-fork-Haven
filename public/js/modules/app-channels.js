@@ -81,8 +81,9 @@ async switchChannel(code) {
   document.getElementById('pinned-toggle-btn').style.display = '';
   const _galleryBtn = document.getElementById('gallery-toggle-btn');
   if (_galleryBtn) _galleryBtn.style.display = isDm ? 'none' : '';
-  // Auto-close pinned panel on channel switch so stale pins don't linger
+  // Auto-close pinned panel and Pins PiP on channel switch so stale pins don't linger
   document.getElementById('pinned-panel').style.display = 'none';
+  this._closePinsPiP?.();
 
   // Show "Select messages" button for admins/mods on non-DM channels
   const moveSelectBtn = document.getElementById('move-select-btn');
@@ -330,6 +331,17 @@ _openChannelCtxMenu(code, btnEl) {
   menu.querySelectorAll('.admin-only').forEach(el => {
     el.style.display = canManageChannels ? '' : 'none';
   });
+  // Webhook button: also accessible to users with manage_webhooks permission
+  const webhooksCtxBtn = menu.querySelector('[data-action="webhooks"]');
+  const canManageWebhooks = canManageChannels || this._hasPerm('manage_webhooks');
+  if (webhooksCtxBtn) {
+    webhooksCtxBtn.style.display = canManageWebhooks ? '' : 'none';
+    // If user only has manage_webhooks (not full admin), show a separator above
+    if (!canManageChannels && canManageWebhooks) {
+      const adminSeps = menu.querySelectorAll('hr.channel-ctx-sep.admin-only');
+      if (adminSeps[0]) adminSeps[0].style.display = '';
+    }
+  }
   // Show delete button for users with delete_channel permission even if not admin
   const deleteBtn = menu.querySelector('[data-action="delete"]');
   if (deleteBtn && !canManageChannels && this._hasPerm('delete_channel')) {
@@ -2629,6 +2641,28 @@ _resyncDesktopBadgeOnFocus() {
   this._desktopBadgeFocusBound = true;
   const resync = () => {
     if (document.hidden) return;
+    // Clear stale unread badge on the channel the user is actively viewing.
+    // When the page is hidden (backgrounded BrowserView, alt-tab, minimise)
+    // incoming messages bump unreadCounts even though the user was already
+    // at the bottom — because isActivelyViewing = false in the new-message
+    // handler.  The badge-clearing path inside that handler only fires when
+    // a *new* message arrives while visible, so if no message arrives after
+    // the user returns the "N unread" badge is stuck until someone else
+    // types.  Fix: as soon as the window becomes visible again, if the user
+    // is still coupled to the bottom of the current channel, treat those
+    // messages as read immediately. (#phantom-badge-on-focus-return)
+    if (this.currentChannel && this._coupledToBottom && this.unreadCounts?.[this.currentChannel]) {
+      const code = this.currentChannel;
+      const ch = this.channels?.find(c => c.code === code);
+      const latestId = ch?.latestMessageId || this._newestMsgId;
+      this.unreadCounts[code] = 0;
+      try { this._updateBadge?.(code); } catch {}
+      try { this._updateDmSectionBadge?.(); } catch {}
+      try { this._updateTabTitle?.(); } catch {}
+      if (latestId) {
+        try { this.socket.emit('mark-read', { code, messageId: latestId }); } catch {}
+      }
+    }
     try { this._updateDesktopBadge(); } catch {}
   };
   window.addEventListener('focus', resync);
@@ -2644,6 +2678,11 @@ _resyncDesktopBadgeOnFocus() {
 _fireNativeNotification(message, channelCode, opts) {
   // Server-level mute: suppress all notifications from this server instance.
   if (localStorage.getItem('haven_server_muted') === '1') return;
+  // Per-channel mute: client-side muted channels list (defense-in-depth — callers
+  // should also check, but bots / webhooks have user_id=null which can slip through
+  // edge cases such as channels-list re-seeding or future notification paths).
+  const _mutedChsNotif = JSON.parse(localStorage.getItem('haven_muted_channels') || '[]');
+  if (_mutedChsNotif.includes(channelCode)) return;
   // Check per-type notification toggles
   const n = this.notifications;
   if (opts && opts.isMention && n.mentionsEnabled) { /* allowed */ }
