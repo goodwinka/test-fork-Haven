@@ -16134,7 +16134,10 @@ ul.chat-list { list-style-type: disc; }
   border: 1px solid var(--border, #3f4147);
   border-radius: 10px;
   box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-  z-index: 1050;
+  /* #5377: must clear .message-input-area (99995) which creates a stacking
+     context above #fx-layers. See /memories/repo/haven-zindex-layer-map.md
+     before changing this. */
+  z-index: 100000;
   font-size: 14px;
   color: var(--text-primary, #dbdee1);
 }
