@@ -1465,6 +1465,93 @@ _setupUI() {
       document.querySelectorAll('#media-gallery-modal .media-tab').forEach(b => b.classList.toggle('active', b === btn));
       this._mediaGalleryActiveTab = btn.dataset.tab;
       if (this._mediaGalleryData) this._renderMediaGalleryTab(this._mediaGalleryActiveTab);
+      // Switching tabs clears selection — selecting items across tabs and
+      // hitting Delete would be confusing since each tab has its own scope.
+      if (this._mediaGallerySelected) this._mediaGallerySelected.clear();
+      this._refreshMediaGalleryToolbar();
+    });
+  });
+
+  // ── Sort dropdown (#5375) ──
+  const sortSel = document.getElementById('media-gallery-sort');
+  if (sortSel) {
+    // Persist last-used sort so users don't have to re-pick it each session
+    try {
+      const saved = localStorage.getItem('mediaGallerySort');
+      if (saved) { sortSel.value = saved; this._mediaGallerySort = saved; }
+      else this._mediaGallerySort = 'date-desc';
+    } catch { this._mediaGallerySort = 'date-desc'; }
+    sortSel.addEventListener('change', () => {
+      this._mediaGallerySort = sortSel.value || 'date-desc';
+      try { localStorage.setItem('mediaGallerySort', this._mediaGallerySort); } catch {}
+      if (this._mediaGalleryData) this._renderMediaGalleryTab(this._mediaGalleryActiveTab || 'photos');
+    });
+  }
+
+  // ── Select / multi-delete bar (#5375) ──
+  const selToggle = document.getElementById('media-gallery-select-toggle');
+  const selAll    = document.getElementById('media-gallery-select-all');
+  const delBtn    = document.getElementById('media-gallery-delete');
+  if (selToggle) selToggle.addEventListener('click', () => {
+    this._mediaGallerySelectMode = !this._mediaGallerySelectMode;
+    if (!this._mediaGallerySelectMode && this._mediaGallerySelected) this._mediaGallerySelected.clear();
+    this._refreshMediaGalleryToolbar();
+    if (this._mediaGalleryData) this._renderMediaGalleryTab(this._mediaGalleryActiveTab || 'photos');
+  });
+  if (selAll) selAll.addEventListener('click', () => {
+    if (!this._mediaGalleryData || !this._mediaGallerySelectMode) return;
+    const tab = this._mediaGalleryActiveTab || 'photos';
+    if (tab === 'links') return; // not deletable
+    const items = this._mediaGalleryData[tab] || [];
+    const selected = this._mediaGallerySelected || (this._mediaGallerySelected = new Map());
+    // Toggle: if everything in this tab is already selected, clear; else add all
+    const allSelected = items.length > 0 && items.every(it => selected.has(this._mediaItemKey(it)));
+    if (allSelected) {
+      items.forEach(it => selected.delete(this._mediaItemKey(it)));
+    } else {
+      items.forEach(it => selected.set(this._mediaItemKey(it), { message_id: it.message_id, url: it.url }));
+    }
+    this._refreshMediaGalleryToolbar();
+    this._renderMediaGalleryTab(tab);
+  });
+  if (delBtn) delBtn.addEventListener('click', () => {
+    if (!this._mediaGallerySelected || this._mediaGallerySelected.size === 0) return;
+    if (!this.currentChannel) return;
+    const count = this._mediaGallerySelected.size;
+    const ok = confirm(
+      (window.t && t('media_gallery.confirm_delete', { count })) ||
+      `Delete ${count} selected item${count === 1 ? '' : 's'}? The underlying messages will be removed for everyone. This cannot be undone.`
+    );
+    if (!ok) return;
+    // Build messageIds (one delete per message — bulk endpoint dedupes
+    // server-side too). Group attachment URLs per message id so E2E DM
+    // attachments can be moved to deleted-attachments/ even though the
+    // server can't read the ciphertext.
+    const messageIds = [];
+    const attachmentsByMessage = {};
+    for (const { message_id, url } of this._mediaGallerySelected.values()) {
+      if (!messageIds.includes(message_id)) messageIds.push(message_id);
+      if (!attachmentsByMessage[message_id]) attachmentsByMessage[message_id] = [];
+      if (url && url.startsWith('/uploads/')) attachmentsByMessage[message_id].push(url);
+    }
+    delBtn.disabled = true;
+    this.socket.emit('delete-channel-media', {
+      code: this.currentChannel,
+      messageIds,
+      attachmentsByMessage,
+    }, (res) => {
+      delBtn.disabled = false;
+      if (!res || res.error) {
+        if (this._showToast) this._showToast(res?.error || 'Delete failed', 'error');
+        else alert(res?.error || 'Delete failed');
+        return;
+      }
+      if (this._showToast) this._showToast(`Deleted ${res.deleted || 0}${res.skipped ? ` (${res.skipped} skipped)` : ''}`, 'info');
+      // Clear selection, exit select mode, and refresh data
+      if (this._mediaGallerySelected) this._mediaGallerySelected.clear();
+      this._mediaGallerySelectMode = false;
+      this._refreshMediaGalleryToolbar();
+      this.socket.emit('get-channel-media', { code: this.currentChannel });
     });
   });
 
@@ -5423,14 +5510,94 @@ _renderMediaGallery(data) {
     const el = document.getElementById(`media-count-${k}`);
     if (el) el.textContent = String((data[k] || []).length);
   });
+  // Reset selection whenever fresh data comes in so stale picks don't linger
+  this._mediaGallerySelected = new Map();
+  this._mediaGallerySelectMode = false;
+  this._refreshMediaGalleryToolbar();
   this._renderMediaGalleryTab(this._mediaGalleryActiveTab || 'photos');
+},
+
+// Build a stable key for a gallery row so the same attachment shared
+// across multiple messages is treated as distinct (since each row is its
+// own delete target). message_id + url is unique enough.
+_mediaItemKey(it) {
+  return `${it.message_id}|${it.url}`;
+},
+
+// Format bytes for the file size column / sort options. Matches the
+// human-readable formatting used elsewhere for upload size hints.
+_formatMediaSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n <= 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+},
+
+// Apply current sort to a tab's items without mutating the source array
+// (so switching sort orders doesn't permanently scramble the data).
+_sortMediaItems(items) {
+  const sort = this._mediaGallerySort || 'date-desc';
+  const arr = items.slice();
+  const cmpDate = (a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0);
+  const cmpSize = (a, b) => (a.size || 0) - (b.size || 0);
+  const cmpName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base', numeric: true });
+  switch (sort) {
+    case 'date-asc':  arr.sort(cmpDate); break;
+    case 'size-asc':  arr.sort(cmpSize); break;
+    case 'size-desc': arr.sort((a, b) => -cmpSize(a, b)); break;
+    case 'name-asc':  arr.sort(cmpName); break;
+    case 'name-desc': arr.sort((a, b) => -cmpName(a, b)); break;
+    case 'date-desc':
+    default:          arr.sort((a, b) => -cmpDate(a, b)); break;
+  }
+  return arr;
+},
+
+// Returns true if the current user can bulk-delete content in this
+// channel via the gallery (admins or anyone with delete_message; we
+// don't expose Select Mode for self-only deleters because the bulk
+// endpoint silently skips ones they can't touch — that's confusing).
+_canBulkDeleteMedia() {
+  if (!this.user) return false;
+  if (this.user.isAdmin) return true;
+  if (this._hasPerm && this._hasPerm('delete_message')) return true;
+  if (this._hasPerm && this._hasPerm('delete_lower_messages')) return true;
+  return false;
+},
+
+// Show/hide the Select + Delete bar and update the info text whenever
+// selection state changes.
+_refreshMediaGalleryToolbar() {
+  const actions = document.getElementById('media-gallery-actions');
+  const toggle  = document.getElementById('media-gallery-select-toggle');
+  const selAll  = document.getElementById('media-gallery-select-all');
+  const delBtn  = document.getElementById('media-gallery-delete');
+  const info    = document.getElementById('media-gallery-selection-info');
+  if (!actions || !toggle || !selAll || !delBtn || !info) return;
+  if (!this._canBulkDeleteMedia()) {
+    actions.style.display = 'none';
+    return;
+  }
+  actions.style.display = '';
+  const selectMode = !!this._mediaGallerySelectMode;
+  const count = this._mediaGallerySelected ? this._mediaGallerySelected.size : 0;
+  toggle.textContent = selectMode
+    ? ((window.t && t('media_gallery.cancel_select')) || 'Cancel')
+    : ((window.t && t('media_gallery.select')) || 'Select');
+  selAll.style.display = selectMode ? '' : 'none';
+  delBtn.style.display = selectMode ? '' : 'none';
+  delBtn.disabled = count === 0;
+  info.style.display = selectMode ? '' : 'none';
+  info.textContent = selectMode ? `${count} selected` : '';
 },
 
 _renderMediaGalleryTab(tab) {
   const body = document.getElementById('media-gallery-body');
   if (!body || !this._mediaGalleryData) return;
-  const items = this._mediaGalleryData[tab] || [];
-  if (items.length === 0) {
+  const rawItems = this._mediaGalleryData[tab] || [];
+  if (rawItems.length === 0) {
     const labels = {
       photos: 'No photos in this channel yet',
       videos: 'No videos in this channel yet',
@@ -5441,6 +5608,7 @@ _renderMediaGalleryTab(tab) {
     body.innerHTML = `<div class="media-gallery-empty muted-text">${labels[tab] || 'Nothing here yet'}</div>`;
     return;
   }
+  const items = this._sortMediaItems(rawItems);
 
   const fmt = (iso) => {
     try {
@@ -5451,42 +5619,69 @@ _renderMediaGalleryTab(tab) {
   };
   const esc = (s) => this._escapeHtml ? this._escapeHtml(s) : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+  // Links don't have a backing /uploads/ file we can delete from disk and
+  // sit inside whatever message they were posted in (often alongside
+  // unrelated text), so bulk-delete is intentionally disabled for them.
+  const selectMode = !!this._mediaGallerySelectMode && tab !== 'links';
+  const selected = this._mediaGallerySelected || new Map();
+  const selBox = (it) => {
+    if (!selectMode) return '';
+    const key = this._mediaItemKey(it);
+    const checked = selected.has(key) ? 'checked' : '';
+    return `<label class="media-select-box" data-msg-id="${it.message_id}" data-url="${esc(it.url)}"><input type="checkbox" ${checked}></label>`;
+  };
+  const sizeBadge = (it) => {
+    const s = this._formatMediaSize(it.size);
+    return s ? `<span class="media-size-badge">${esc(s)}</span>` : '';
+  };
+
   if (tab === 'photos') {
-    body.innerHTML = `<div class="media-gallery-grid">${items.map(it => `
-      <div class="media-grid-item" data-url="${esc(it.url)}" data-msg-id="${it.message_id}" data-action="lightbox" title="${esc(it.username || '')} • ${esc(fmt(it.created_at))}">
+    body.innerHTML = `<div class="media-gallery-grid${selectMode ? ' select-mode' : ''}">${items.map(it => `
+      <div class="media-grid-item${selected.has(this._mediaItemKey(it)) ? ' selected' : ''}" data-url="${esc(it.url)}" data-msg-id="${it.message_id}" data-action="lightbox" title="${esc(it.username || '')} • ${esc(fmt(it.created_at))}">
+        ${selBox(it)}
         <img src="${esc(it.url)}" loading="lazy" alt="">
         <button class="media-grid-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
-        <div class="media-grid-date">${esc(fmt(it.created_at))}</div>
+        <div class="media-grid-date">${esc(fmt(it.created_at))}${sizeBadge(it) ? ' • ' + sizeBadge(it) : ''}</div>
       </div>`).join('')}</div>`;
   } else if (tab === 'videos') {
-    body.innerHTML = `<div class="media-gallery-grid">${items.map(it => `
-      <div class="media-grid-item" data-url="${esc(it.url)}" data-msg-id="${it.message_id}" data-action="video-lightbox" title="${esc(it.username || '')} • ${esc(fmt(it.created_at))}">
+    body.innerHTML = `<div class="media-gallery-grid${selectMode ? ' select-mode' : ''}">${items.map(it => `
+      <div class="media-grid-item${selected.has(this._mediaItemKey(it)) ? ' selected' : ''}" data-url="${esc(it.url)}" data-msg-id="${it.message_id}" data-action="video-lightbox" title="${esc(it.username || '')} • ${esc(fmt(it.created_at))}">
+        ${selBox(it)}
         <video src="${esc(it.url)}" preload="metadata" muted></video>
         <div class="media-grid-play">▶</div>
         <button class="media-grid-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
-        <div class="media-grid-date">${esc(fmt(it.created_at))}</div>
+        <div class="media-grid-date">${esc(fmt(it.created_at))}${sizeBadge(it) ? ' • ' + sizeBadge(it) : ''}</div>
       </div>`).join('')}</div>`;
   } else if (tab === 'audios') {
-    body.innerHTML = `<div class="media-list">${items.map(it => `
-      <div class="media-list-item" data-msg-id="${it.message_id}">
+    body.innerHTML = `<div class="media-list${selectMode ? ' select-mode' : ''}">${items.map(it => `
+      <div class="media-list-item${selected.has(this._mediaItemKey(it)) ? ' selected' : ''}" data-msg-id="${it.message_id}" data-url="${esc(it.url)}">
+        ${selBox(it)}
         <div class="media-list-icon">🎵</div>
         <div class="media-list-info">
-          <span class="media-list-name">${esc(it.name || it.url.split('/').pop())}</span>
+          <span class="media-list-name">${esc(it.name || it.url.split('/').pop())} ${sizeBadge(it)}</span>
           <span class="media-list-meta">${esc(it.username || '')} • ${esc(fmt(it.created_at))}</span>
           <audio class="media-list-audio" src="${esc(it.url)}" controls preload="none"></audio>
         </div>
         <button class="media-list-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
       </div>`).join('')}</div>`;
   } else if (tab === 'files') {
-    body.innerHTML = `<div class="media-list">${items.map(it => `
-      <a class="media-list-item" href="${esc(it.url)}" download target="_blank" rel="noopener">
+    // In select mode, render as <div> instead of <a> so clicking the row
+    // toggles selection instead of triggering the download.
+    body.innerHTML = `<div class="media-list${selectMode ? ' select-mode' : ''}">${items.map(it => {
+      const isSel = selected.has(this._mediaItemKey(it));
+      const tag = selectMode ? 'div' : 'a';
+      const linkAttrs = selectMode ? '' : ` href="${esc(it.url)}" download target="_blank" rel="noopener"`;
+      return `
+      <${tag} class="media-list-item${isSel ? ' selected' : ''}" data-msg-id="${it.message_id}" data-url="${esc(it.url)}"${linkAttrs}>
+        ${selBox(it)}
         <div class="media-list-icon">📄</div>
         <div class="media-list-info">
-          <span class="media-list-name">${esc(it.name || it.url.split('/').pop())}</span>
+          <span class="media-list-name">${esc(it.name || it.url.split('/').pop())} ${sizeBadge(it)}</span>
           <span class="media-list-meta">${esc(it.username || '')} • ${esc(fmt(it.created_at))}</span>
         </div>
         <button class="media-list-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
-      </a>`).join('')}</div>`;
+      </${tag}>`;
+    }).join('')}</div>`;
   } else if (tab === 'links') {
     body.innerHTML = `<div class="media-list">${items.map(it => {
       let host = '';
@@ -5504,21 +5699,55 @@ _renderMediaGalleryTab(tab) {
     }).join('')}</div>`;
   }
 
-  // Bind clicks: lightbox for photos, jump-to-message for jump buttons / video tiles
-  body.querySelectorAll('[data-action="lightbox"]').forEach(el => {
-    el.addEventListener('click', () => {
-      const url = el.dataset.url;
-      if (url && this._openLightbox) this._openLightbox(url);
+  // Selection checkbox + row-click toggling (only active when in select
+  // mode). We let users click anywhere on the tile/row to toggle, but
+  // suppress the lightbox/download/jump actions during selection.
+  if (selectMode) {
+    body.querySelectorAll('.media-select-box').forEach(box => {
+      box.addEventListener('click', (e) => {
+        e.stopPropagation();
+      });
+      const cb = box.querySelector('input[type="checkbox"]');
+      if (cb) cb.addEventListener('change', () => {
+        const msgId = parseInt(box.dataset.msgId);
+        const url = box.dataset.url;
+        const key = `${msgId}|${url}`;
+        if (cb.checked) this._mediaGallerySelected.set(key, { message_id: msgId, url });
+        else this._mediaGallerySelected.delete(key);
+        const item = box.closest('.media-grid-item, .media-list-item');
+        if (item) item.classList.toggle('selected', cb.checked);
+        this._refreshMediaGalleryToolbar();
+      });
     });
-  });
-  body.querySelectorAll('[data-action="video-lightbox"]').forEach(el => {
-    el.addEventListener('click', (e) => {
-      // Avoid triggering when the user clicks the inner jump button
-      if (e.target.closest('[data-action="jump"]')) return;
-      const url = el.dataset.url;
-      if (url) this._openVideoLightbox(url);
+    body.querySelectorAll('.media-grid-item, .media-list-item').forEach(el => {
+      el.addEventListener('click', (e) => {
+        // Only react to bare row clicks, not clicks on the checkbox label
+        // itself (handled above) or on inner controls.
+        if (e.target.closest('.media-select-box') || e.target.closest('[data-action="jump"]') ||
+            e.target.tagName === 'AUDIO' || e.target.tagName === 'VIDEO' || e.target.tagName === 'INPUT') return;
+        const cb = el.querySelector('.media-select-box input[type="checkbox"]');
+        if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
+        e.preventDefault();
+        e.stopPropagation();
+      }, true);
     });
-  });
+  } else {
+    // Normal click behavior (lightbox, video preview, jump-to-message)
+    body.querySelectorAll('[data-action="lightbox"]').forEach(el => {
+      el.addEventListener('click', () => {
+        const url = el.dataset.url;
+        if (url && this._openLightbox) this._openLightbox(url);
+      });
+    });
+    body.querySelectorAll('[data-action="video-lightbox"]').forEach(el => {
+      el.addEventListener('click', (e) => {
+        // Avoid triggering when the user clicks the inner jump button
+        if (e.target.closest('[data-action="jump"]')) return;
+        const url = el.dataset.url;
+        if (url) this._openVideoLightbox(url);
+      });
+    });
+  }
   body.querySelectorAll('[data-action="jump"]').forEach(el => {
     el.addEventListener('click', (e) => {
       e.preventDefault();

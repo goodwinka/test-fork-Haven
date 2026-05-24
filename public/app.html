@@ -3208,6 +3208,25 @@
         <button class="media-tab" data-tab="files"  role="tab">📄 <span data-i18n="media_gallery.files">Files</span>  <span class="media-tab-count" id="media-count-files">0</span></button>
         <button class="media-tab" data-tab="links"  role="tab">🔗 <span data-i18n="media_gallery.links">Links</span>  <span class="media-tab-count" id="media-count-links">0</span></button>
       </div>
+      <div class="media-gallery-toolbar">
+        <label class="media-gallery-sort-label">
+          <span data-i18n="media_gallery.sort_by">Sort by</span>
+          <select id="media-gallery-sort" class="media-gallery-sort">
+            <option value="date-desc" data-i18n="media_gallery.sort_newest">Newest first</option>
+            <option value="date-asc" data-i18n="media_gallery.sort_oldest">Oldest first</option>
+            <option value="size-desc" data-i18n="media_gallery.sort_largest">Largest first</option>
+            <option value="size-asc" data-i18n="media_gallery.sort_smallest">Smallest first</option>
+            <option value="name-asc" data-i18n="media_gallery.sort_name_az">Name A→Z</option>
+            <option value="name-desc" data-i18n="media_gallery.sort_name_za">Name Z→A</option>
+          </select>
+        </label>
+        <div class="media-gallery-actions" id="media-gallery-actions" style="display:none">
+          <button class="btn-sm" id="media-gallery-select-toggle" data-i18n="media_gallery.select">Select</button>
+          <span class="media-gallery-selection-info" id="media-gallery-selection-info" style="display:none"></span>
+          <button class="btn-sm" id="media-gallery-select-all" style="display:none" data-i18n="media_gallery.select_all">Select all</button>
+          <button class="btn-sm btn-danger-fill" id="media-gallery-delete" style="display:none" disabled data-i18n="media_gallery.delete_selected">Delete selected</button>
+        </div>
+      </div>
       <div class="media-gallery-body" id="media-gallery-body">
         <div class="media-gallery-empty muted-text" data-i18n="media_gallery.loading">Loading…</div>
       </div>

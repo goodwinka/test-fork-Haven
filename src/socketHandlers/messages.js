@@ -381,34 +381,63 @@ module.exports = function register(socket, ctx) {
     const AUD_EXT = /\.(mp3|wav|ogg|m4a|flac|aac|opus|weba)(?:$|[?#|])/i;
 
     // [file:Original Name](/uploads/...|size) markdown wrapper
-    // File attachments use [file:name](url|size) format; capture url stopping at | ) or whitespace
-    const fileLinkRe = /\[file:([^\]]+)\]\((\/uploads\/[^)|\s]+)(?:\|[^)]*)?\)/g;
+    // File attachments use [file:name](url|size) format; capture url + size separately
+    const fileLinkRe = /\[file:([^\]]+)\]\((\/uploads\/[^)|\s]+)(?:\|([^)]*))?\)/g;
     // bare /uploads/ URL (image markdown ![alt](/uploads/x) or plain path)
     const uploadRe   = /(?:!\[[^\]]*\]\(([^)\s]+)\)|(\/uploads\/[^\s)]+))/g;
     // http(s):// URLs (anywhere in content)
     const httpRe     = /(https?:\/\/[^\s<>"']+)/gi;
 
+    // Resolve a /uploads/<name> path to a byte size by stat'ing the file on
+    // disk. Memoized per request so a popular file isn't stat'd hundreds of
+    // times. Returns 0 when the file is missing or path-traversal would
+    // escape UPLOADS_DIR.
+    const sizeCache = new Map();
+    const safeName = /^[\w\-.]+$/;
+    const sizeOf = (url) => {
+      if (!url || !url.startsWith('/uploads/')) return 0;
+      if (sizeCache.has(url)) return sizeCache.get(url);
+      const name = url.slice('/uploads/'.length);
+      if (!safeName.test(name)) { sizeCache.set(url, 0); return 0; }
+      let s = 0;
+      try {
+        const full = path.join(UPLOADS_DIR, name);
+        const st = fs.statSync(full);
+        if (st && st.isFile()) s = st.size;
+      } catch { /* missing or permission denied */ }
+      sizeCache.set(url, s);
+      return s;
+    };
+
     for (const row of rows) {
       const ts = row.created_at && !row.created_at.endsWith('Z') ? utcStamp(row.created_at) : row.created_at;
       const seen = new Set(); // dedupe URLs within a single message
-      const baseEntry = (url, name) => ({
-        message_id: row.id,
-        url,
-        name: name || row.original_name || url.split('/').pop(),
-        created_at: ts,
-        username: row.username,
-        user_id: row.user_id,
-      });
+      const baseEntry = (url, name, sizeHint) => {
+        let size = 0;
+        if (typeof sizeHint === 'number' && sizeHint > 0) size = sizeHint;
+        else if (typeof sizeHint === 'string' && /^\d+$/.test(sizeHint)) size = parseInt(sizeHint, 10);
+        else size = sizeOf(url);
+        return {
+          message_id: row.id,
+          url,
+          name: name || row.original_name || url.split('/').pop(),
+          size,
+          created_at: ts,
+          username: row.username,
+          user_id: row.user_id,
+        };
+      };
 
-      // 1) [file:name](url) wrappers
+      // 1) [file:name](url|size) wrappers
       let m;
       const content = row.content || '';
       while ((m = fileLinkRe.exec(content)) !== null) {
         const name = m[1];
         const url  = m[2];
+        const sizeHint = m[3];
         if (seen.has(url)) continue;
         seen.add(url);
-        const entry = baseEntry(url, name);
+        const entry = baseEntry(url, name, sizeHint);
         if      (IMG_EXT.test(url)) photos.push(entry);
         else if (VID_EXT.test(url)) videos.push(entry);
         else if (AUD_EXT.test(url)) audios.push(entry);
@@ -455,6 +484,132 @@ module.exports = function register(socket, ctx) {
       files,
       links,
     });
+  });
+
+  // ── Bulk delete from media gallery (#5375) ──────────────
+  // Lets admins / users with delete permission remove many attachments at
+  // once from the Files & Media view. Reuses the same permission rules and
+  // file-move-to-deleted-attachments behavior as the single-message
+  // `delete-message` handler. Operates per-message inside a transaction
+  // and broadcasts `message-deleted` for each one so other clients update.
+  socket.on('delete-channel-media', (data, callback) => {
+    const cb = typeof callback === 'function' ? callback : () => {};
+    if (!data || typeof data !== 'object') return cb({ error: 'Bad request' });
+    const code = typeof data.code === 'string' ? data.code.trim() : '';
+    if (!code || !/^[a-f0-9]{8}$/i.test(code)) return cb({ error: 'Bad channel' });
+
+    const ids = Array.isArray(data.messageIds)
+      ? Array.from(new Set(data.messageIds.filter(isInt))).slice(0, 500)
+      : [];
+    if (ids.length === 0) return cb({ error: 'No items selected' });
+
+    const channel = db.prepare('SELECT id, is_dm FROM channels WHERE code = ?').get(code);
+    if (!channel) return cb({ error: 'Channel not found' });
+
+    const member = db.prepare(
+      'SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?'
+    ).get(channel.id, socket.user.id);
+    if (!member && !socket.user.isAdmin) return cb({ error: 'Not a member' });
+
+    const canDeleteAny  = socket.user.isAdmin || userHasPermission(socket.user.id, 'delete_message', channel.id);
+    const canDeleteLowr = !canDeleteAny && userHasPermission(socket.user.id, 'delete_lower_messages', channel.id);
+    const myLevel = (!canDeleteAny && canDeleteLowr) ? getUserEffectiveLevel(socket.user.id, channel.id) : 0;
+
+    // Allow self-delete fallback only if the policy allows it. Mirrors
+    // `delete-message`'s logic for own messages.
+    let allowOwnDelete = true;
+    if (!socket.user.isAdmin) {
+      try {
+        const deny = db.prepare(
+          "SELECT allowed FROM user_role_perms WHERE user_id = ? AND permission = 'delete_own_messages' ORDER BY allowed ASC LIMIT 1"
+        ).get(socket.user.id);
+        if (deny && deny.allowed === 0) allowOwnDelete = false;
+      } catch { /* table may not exist */ }
+    }
+
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = db.prepare(
+      `SELECT id, user_id, content FROM messages WHERE channel_id = ? AND id IN (${placeholders})`
+    ).all(channel.id, ...ids);
+
+    const deletable = [];
+    const skipped = [];
+    for (const r of rows) {
+      let ok = false;
+      if (r.user_id === socket.user.id) {
+        ok = allowOwnDelete;
+      } else if (canDeleteAny) {
+        ok = true;
+      } else if (canDeleteLowr) {
+        const targetLevel = getUserEffectiveLevel(r.user_id, channel.id);
+        ok = myLevel > targetLevel;
+      }
+      if (ok) deletable.push(r);
+      else    skipped.push(r.id);
+    }
+
+    if (deletable.length === 0) {
+      return cb({ error: 'You don\'t have permission to delete the selected items', deleted: 0, skipped: skipped.length });
+    }
+
+    const delPin = db.prepare('DELETE FROM pinned_messages WHERE message_id = ?');
+    const delRx  = db.prepare('DELETE FROM reactions WHERE message_id = ?');
+    const delMsg = db.prepare('DELETE FROM messages WHERE id = ?');
+    const purge = db.transaction(() => {
+      for (const r of deletable) {
+        delPin.run(r.id);
+        delRx.run(r.id);
+        delMsg.run(r.id);
+      }
+    });
+    try { purge(); } catch (err) {
+      console.error('Bulk media delete error:', err);
+      return cb({ error: 'Failed to delete items', detail: err && err.message });
+    }
+
+    // Move attachment files to deleted-attachments/ for each deleted message
+    const uploadRe = /\/uploads\/((?!deleted-attachments)[\w\-.]+)/g;
+    for (const r of deletable) {
+      uploadRe.lastIndex = 0;
+      let m;
+      while ((m = uploadRe.exec(r.content || '')) !== null) {
+        const src = path.join(UPLOADS_DIR, m[1]);
+        const dst = path.join(DELETED_ATTACHMENTS_DIR, m[1]);
+        if (fs.existsSync(src)) {
+          try { fs.renameSync(src, dst); } catch { /* file locked or already moved */ }
+        }
+      }
+      // For E2E DMs the content is ciphertext; honor client-supplied URLs
+      // the same way `delete-message` does. (`data.attachmentsByMessage`
+      // is an object map { [messageId]: [url, url, ...] }.)
+      if (channel.is_dm && data.attachmentsByMessage && typeof data.attachmentsByMessage === 'object') {
+        const urls = data.attachmentsByMessage[r.id];
+        if (Array.isArray(urls)) {
+          const safeName = /^[\w\-.]+$/;
+          for (const url of urls) {
+            if (typeof url !== 'string') continue;
+            const match = url.match(/^\/uploads\/((?!deleted-attachments)[\w\-.]+)$/);
+            if (!match || !safeName.test(match[1])) continue;
+            const src = path.join(UPLOADS_DIR, match[1]);
+            const dst = path.join(DELETED_ATTACHMENTS_DIR, match[1]);
+            if (fs.existsSync(src)) {
+              try { fs.renameSync(src, dst); } catch { /* ignore */ }
+            }
+          }
+        }
+      }
+    }
+
+    // Broadcast individual deletes so all clients' message lists, pin lists,
+    // and open Files & Media views stay consistent.
+    for (const r of deletable) {
+      io.to(`channel:${code}`).emit('message-deleted', {
+        channelCode: code,
+        messageId: r.id
+      });
+    }
+
+    cb({ success: true, deleted: deletable.length, skipped: skipped.length });
   });
 
   // ── Send message ────────────────────────────────────────
