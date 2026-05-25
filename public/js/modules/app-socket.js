@@ -285,6 +285,62 @@ _setupSocketListeners() {
     }
   });
 
+  // ── Wake-from-sleep detector (#post-sleep-channel-desync round 2) ──
+  // The visibilitychange-based fix above ONLY catches scenarios where the
+  // browser fires a hidden→visible transition. On Windows, locking the PC
+  // (Win+L) does NOT hide the window from the browser's perspective — the
+  // lock screen is an OS overlay, not a window state change. So after a
+  // multi-hour lock, visibilitychange never fires on unlock, and the
+  // previous fix never runs. Result: empty member list, empty chat,
+  // zombie socket that the client thinks is still connected.
+  //
+  // Timer drift detection works regardless of visibility: when the OS
+  // suspends or throttles JS execution, setInterval ticks pause. On wake,
+  // the next tick fires immediately with a huge gap from the previous
+  // tick. If that gap exceeds the threshold, we know the process was
+  // suspended and the socket is almost certainly a zombie.
+  this._lastWakeCheck = Date.now();
+  if (this._wakeCheckInterval) clearInterval(this._wakeCheckInterval);
+  this._wakeCheckInterval = setInterval(() => {
+    const now = Date.now();
+    const drift = now - this._lastWakeCheck;
+    this._lastWakeCheck = now;
+    // Threshold: 30 s. Normal tick is 5 s, so even with heavy GC pauses
+    // or main-thread blocking we won't false-positive at 30 s.
+    if (drift > 30000) {
+      console.log(`[wake-detect] resumed after ${Math.round(drift/1000)}s, forcing socket resync`);
+      this._forceFullResync('wake-from-sleep');
+    }
+  }, 5000);
+
+  // Window focus is another reliable wake signal on Windows: when the user
+  // unlocks the PC and clicks back into the Haven window, focus fires even
+  // if visibilitychange didn't. We debounce against the wake detector so
+  // we don't double-cycle the socket within a few seconds.
+  window.addEventListener('focus', () => {
+    const sinceLastResync = Date.now() - (this._lastForcedResync || 0);
+    if (sinceLastResync < 5000) return;
+    // Cheap liveness probe: emit a ping-check and force-resync if no pong
+    // arrives within 4 s. Avoids needlessly cycling the socket on a quick
+    // window-switch where the connection is actually fine.
+    if (!this.socket?.connected) {
+      this._forceFullResync('focus-disconnected');
+      return;
+    }
+    const probeStart = Date.now();
+    let acked = false;
+    const ackHandler = () => { acked = true; };
+    this.socket.once('pong-check', ackHandler);
+    try { this.socket.emit('ping-check'); } catch {}
+    setTimeout(() => {
+      this.socket?.off('pong-check', ackHandler);
+      if (!acked) {
+        console.log(`[wake-detect] no pong in 4s on focus (probe ${Date.now()-probeStart}ms), zombie socket — forcing resync`);
+        this._forceFullResync('focus-zombie');
+      }
+    }, 4000);
+  });
+
   this.socket.on('disconnect', () => {
     this._setLed('connection-led', 'danger pulse');
     this._setLed('status-server-led', 'danger pulse');
@@ -514,6 +570,16 @@ _setupSocketListeners() {
   });
 
   this.socket.on('message-history', async (data) => {
+    // (#post-sleep-channel-desync round 2) Clear the switch-channel safety
+    // timer as soon as history arrives for the channel we last switched to.
+    // This is what tells us the get-messages round-trip actually completed.
+    if (this._pendingChannelHistoryCode === data.channelCode) {
+      this._pendingChannelHistoryCode = null;
+      if (this._switchChannelSafetyTimer) {
+        clearTimeout(this._switchChannelSafetyTimer);
+        this._switchChannelSafetyTimer = null;
+      }
+    }
     // DM PiP: if this history is for the active PiP DM, render it there.
     // We render the PiP regardless of currentChannel so the loading
     // placeholder always clears even when the same DM is also the active
@@ -1850,6 +1916,39 @@ _setupSocketListeners() {
       }
     }, 10000);
   }
+},
+
+// ── Force a full socket resync ────────────────────────
+// Cycles the socket and lets the existing 'connect' handler do the full
+// re-fetch (enter-channel, get-messages, get-channel-members,
+// request-voice-users). Used by the wake-from-sleep detector and the
+// window-focus zombie probe. Debounced via _lastForcedResync so multiple
+// triggers within a few seconds collapse to one cycle.
+_forceFullResync(reason) {
+  const now = Date.now();
+  if (now - (this._lastForcedResync || 0) < 3000) return;
+  this._lastForcedResync = now;
+  console.log(`[force-resync] reason=${reason}, socket.connected=${!!this.socket?.connected}`);
+  if (!this.socket) return;
+  try { this.socket.disconnect(); } catch {}
+  try { this.socket.connect(); } catch {}
+  // Defensive: if for some reason 'connect' doesn't fire within 6 s,
+  // emit the resync requests anyway against the current socket so the
+  // user at least gets channel data refreshed. (The connect handler is
+  // the authoritative path — this is purely a belt-and-braces.)
+  setTimeout(() => {
+    if (this.socket?.connected && this.currentChannel) {
+      // Only do this if connect handler didn't already run very recently.
+      const sinceConnect = Date.now() - (this._lastConnectTime || 0);
+      if (sinceConnect > 5000) {
+        try { this.socket.emit('enter-channel', { code: this.currentChannel }); } catch {}
+        try { this.socket.emit('get-messages', { code: this.currentChannel }); } catch {}
+        try { this.socket.emit('get-channel-members', { code: this.currentChannel }); } catch {}
+        try { this.socket.emit('request-online-users', { code: this.currentChannel }); } catch {}
+        try { this.socket.emit('request-voice-users', { code: this.currentChannel }); } catch {}
+      }
+    }
+  }, 6000);
 },
 
 };

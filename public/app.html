@@ -1711,6 +1711,30 @@
           <p class="settings-hint" data-i18n="settings.debug_section.local_talk_indicator_hint">Highlight your own avatar the moment your mic crosses the talk threshold, instead of waiting for the server to echo it back. Default off — the server echo is usually preferred because it confirms your audio actually reached the server.</p>
         </div>
 
+        <div class="desktop-pref-row">
+          <label class="toggle-row">
+            <input type="checkbox" id="pref-debug-disable-screen-echo-cancel">
+            <span class="toggle-label" data-i18n="settings.debug_section.disable_screen_echo_cancel">Disable echo cancellation on screen-share audio</span>
+          </label>
+          <p class="settings-hint" data-i18n="settings.debug_section.disable_screen_echo_cancel_hint">When sharing a screen with system audio, the browser applies echo cancellation by default, which can make music and game audio sound thin or hollow. Turning this on disables echo cancellation for the captured screen audio so listeners hear it full-fidelity. Takes effect on the next screen share — stop and restart sharing if you changed it mid-stream. (#5379)</p>
+        </div>
+
+        <div class="desktop-pref-row">
+          <label class="toggle-row">
+            <input type="checkbox" id="pref-voice-mute-on-join">
+            <span class="toggle-label" data-i18n="settings.debug_section.mute_on_join">Always join voice muted</span>
+          </label>
+          <p class="settings-hint" data-i18n="settings.debug_section.mute_on_join_hint">Force the mic to start muted every time you join a voice channel. Useful if you tend to lurk first, or if you don't want to risk hot-mic'ing right after joining. You can unmute normally once you're in.</p>
+        </div>
+
+        <div class="desktop-pref-row">
+          <label class="toggle-row">
+            <input type="checkbox" id="pref-voice-listener-only">
+            <span class="toggle-label" data-i18n="settings.debug_section.listener_only">Join voice without microphone (listener only)</span>
+          </label>
+          <p class="settings-hint" data-i18n="settings.debug_section.listener_only_hint">Join voice channels without requesting microphone access. You'll hear everyone but won't be able to talk. Useful if you don't own a mic, can't grant mic permission right now, or just want to listen in. Haven will also fall back to listener-only automatically if the mic can't be opened for any reason. (#5380)</p>
+        </div>
+
         <!-- Desktop-only debug setting: shown when running in Haven Desktop -->
         <div class="desktop-pref-row" id="pref-force-sdr-row" style="display:none">
           <label class="toggle-row">

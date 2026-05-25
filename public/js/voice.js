@@ -467,6 +467,11 @@ class VoiceManager {
       const preservedMuteState = this.isMuted;
       const preservedDeafenState = this.isDeafened;
 
+      // #5380 — "Always join muted" user preference. If set, force mute on
+      // every join so users who like to lurk-first never accidentally hot-mic.
+      let muteOnJoin = false;
+      try { muteOnJoin = localStorage.getItem('haven_mute_on_join') === '1'; } catch {}
+
       // Don't attempt to join while the socket is disconnected. The
       // emit() would otherwise be buffered by socket.io and flushed on
       // reconnect, producing duplicate sessions if the user clicked
@@ -497,24 +502,39 @@ class VoiceManager {
       };
       if (savedInputId) audioConstraints.deviceId = { exact: savedInputId };
 
-      try {
-        this.rawStream = await navigator.mediaDevices.getUserMedia({
-          audio: audioConstraints,
-          video: false
-        });
-      } catch (deviceErr) {
-        if (savedInputId) {
-          // Saved device may be stale — retry with default mic
-          console.warn('Saved mic device failed, falling back to default:', deviceErr.message);
-          localStorage.removeItem('haven_input_device');
-          delete audioConstraints.deviceId;
+      // #5380 — listener-only mode flag; set if mic acquisition fails or
+      // the user has explicitly opted out via "Join without microphone".
+      this.isListenerOnly = false;
+      const lurkPref = (() => { try { return localStorage.getItem('haven_listener_only') === '1'; } catch { return false; } })();
+
+      if (!lurkPref) {
+        try {
           this.rawStream = await navigator.mediaDevices.getUserMedia({
             audio: audioConstraints,
             video: false
           });
-        } else {
-          throw deviceErr;
+        } catch (deviceErr) {
+          if (savedInputId) {
+            // Saved device may be stale — retry with default mic
+            console.warn('Saved mic device failed, falling back to default:', deviceErr.message);
+            localStorage.removeItem('haven_input_device');
+            delete audioConstraints.deviceId;
+            try {
+              this.rawStream = await navigator.mediaDevices.getUserMedia({
+                audio: audioConstraints,
+                video: false
+              });
+            } catch (retryErr) {
+              console.warn('[Voice] No mic available, falling back to listener-only mode:', retryErr.message);
+              this.isListenerOnly = true;
+            }
+          } else {
+            console.warn('[Voice] No mic available, falling back to listener-only mode:', deviceErr.message);
+            this.isListenerOnly = true;
+          }
         }
+      } else {
+        this.isListenerOnly = true;
       }
 
       // Opt out of Windows audio ducking (Desktop app only).
@@ -523,58 +543,80 @@ class VoiceManager {
         setTimeout(() => window.havenDesktop.audio.optOutOfDucking().catch(() => {}), 500);
       }
 
-      // ── Noise Gate via Web Audio ──
-      // Route mic through an analyser + gain node so we can silence
-      // audio below a threshold before sending it to peers.
-      const source = this.audioCtx.createMediaStreamSource(this.rawStream);
-      this._rnnoiseSource = source;
-      const gateAnalyser = this.audioCtx.createAnalyser();
-      gateAnalyser.fftSize = 2048;
-      gateAnalyser.smoothingTimeConstant = 0.3;
-      source.connect(gateAnalyser);
+      if (this.isListenerOnly) {
+        // #5380 — Listener-only path: skip mic, noise gate, RNNoise, talk
+        // detection. We still publish a silent placeholder track to peer
+        // connections so the existing offer/answer flow doesn't need any
+        // changes. The track is force-disabled (muted) so peers receive
+        // pure silence. UI shows the user as muted with a "Listener" badge.
+        const silentDest = this.audioCtx.createMediaStreamDestination();
+        // No source connected → MediaStreamDestination produces silence.
+        this._vcDest = silentDest;
+        this.localStream = silentDest.stream;
+        this._rnnoiseSource = null;
+        this._noiseGateAnalyser = null;
+        this._noiseGateGain = null;
+      } else {
+        // ── Noise Gate via Web Audio ──
+        // Route mic through an analyser + gain node so we can silence
+        // audio below a threshold before sending it to peers.
+        const source = this.audioCtx.createMediaStreamSource(this.rawStream);
+        this._rnnoiseSource = source;
+        const gateAnalyser = this.audioCtx.createAnalyser();
+        gateAnalyser.fftSize = 2048;
+        gateAnalyser.smoothingTimeConstant = 0.3;
+        source.connect(gateAnalyser);
 
-      const gateGain = this.audioCtx.createGain();
-      source.connect(gateGain);
+        const gateGain = this.audioCtx.createGain();
+        source.connect(gateGain);
 
-      const dest = this.audioCtx.createMediaStreamDestination();
-      gateGain.connect(dest);
+        const dest = this.audioCtx.createMediaStreamDestination();
+        gateGain.connect(dest);
 
-      this._noiseGateAnalyser = gateAnalyser;
-      this._noiseGateGain = gateGain;
-      this._vcDest = dest;
-      this.localStream = dest.stream;   // processed stream → peers
-      this._startNoiseGate();
+        this._noiseGateAnalyser = gateAnalyser;
+        this._noiseGateGain = gateGain;
+        this._vcDest = dest;
+        this.localStream = dest.stream;   // processed stream → peers
+        this._startNoiseGate();
 
-      // Initialize RNNoise and apply saved noise mode
-      await this._initRNNoise();
-      if (this.noiseMode === 'suppress' && this._rnnoiseReady) {
-        this.setNoiseSensitivity(0);
-        this._enableRNNoise();
-      } else if (this.noiseMode === 'off') {
-        this.setNoiseSensitivity(0);
-      } else if (this.noiseMode === 'gate') {
-        const saved = parseInt(localStorage.getItem('haven_ns_value') || '10', 10);
-        this.setNoiseSensitivity(saved);
+        // Initialize RNNoise and apply saved noise mode
+        await this._initRNNoise();
+        if (this.noiseMode === 'suppress' && this._rnnoiseReady) {
+          this.setNoiseSensitivity(0);
+          this._enableRNNoise();
+        } else if (this.noiseMode === 'off') {
+          this.setNoiseSensitivity(0);
+        } else if (this.noiseMode === 'gate') {
+          const saved = parseInt(localStorage.getItem('haven_ns_value') || '10', 10);
+          this.setNoiseSensitivity(saved);
+        }
       }
 
       this.currentChannel = channelCode;
       this.inVoice = true;
-      this.isMuted = preservedMuteState;
+      // Listener-only is always muted (no audio to send). mute-on-join also forces mute.
+      this.isMuted = this.isListenerOnly || muteOnJoin || preservedMuteState;
       this.isDeafened = preservedDeafenState;
 
       this._applyMuteStateToLocalTracks();
-      
+
       // Persist voice channel for auto-rejoin after page refresh or server restart
       try { localStorage.setItem('haven_voice_channel', channelCode); } catch {}
 
       this.socket.emit('voice-join', { code: channelCode });
+      // Inform peers / UI about our mute state so they show the muted icon
+      // immediately instead of waiting for someone to query.
+      if (this.isMuted) {
+        try { this.socket.emit('voice-mute-state', { code: channelCode, muted: true }); } catch {}
+      }
 
-      // Start local talk indicator (use raw stream for accurate detection)
-      this._startLocalTalkDetection();
+      // Start local talk indicator (use raw stream for accurate detection).
+      // Skip in listener-only mode — there's no mic to detect.
+      if (!this.isListenerOnly) this._startLocalTalkDetection();
 
       return true;
     } catch (err) {
-      console.error('Microphone access failed:', err);
+      console.error('Voice join failed:', err);
       return false;
     }
   }
@@ -761,6 +803,8 @@ class VoiceManager {
   }
 
   toggleMute() {
+    // #5380 — listener-only mode has no mic; force-stay muted.
+    if (this.isListenerOnly) { this.isMuted = true; return true; }
     this.isMuted = !this.isMuted;
     this._applyMuteStateToLocalTracks();
     return this.isMuted;
@@ -827,6 +871,21 @@ class VoiceManager {
         video: videoConstraints,
         audio: true,
       };
+
+      // #5379 — When the debug toggle is on, request raw screen audio with
+      // echo cancellation explicitly disabled. Chromium defaults to applying
+      // echoCancellation to getDisplayMedia audio, which can hollow out music
+      // and game audio for listeners. The user can flip this in
+      // Settings → Debug → "Disable echo cancellation on screen-share audio".
+      try {
+        if (localStorage.getItem('debug_disable_screen_echo_cancel') === '1') {
+          displayMediaOptions.audio = {
+            echoCancellation: false,
+            autoGainControl: false,
+            noiseSuppression: false,
+          };
+        }
+      } catch {}
 
       // These options aren't supported in Electron's Chromium — only add them
       // when running in a regular browser to avoid immediate rejection.

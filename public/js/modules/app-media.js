@@ -1748,6 +1748,42 @@ _setupDebugSection() {
       else localStorage.removeItem('debug_local_talk_indicator');
     } catch {}
   });
+
+  // #5379 — disable echo cancellation on screen-share audio
+  const ecCb = document.getElementById('pref-debug-disable-screen-echo-cancel');
+  if (ecCb) {
+    try { ecCb.checked = localStorage.getItem('debug_disable_screen_echo_cancel') === '1'; } catch {}
+    ecCb.addEventListener('change', () => {
+      try {
+        if (ecCb.checked) localStorage.setItem('debug_disable_screen_echo_cancel', '1');
+        else localStorage.removeItem('debug_disable_screen_echo_cancel');
+      } catch {}
+    });
+  }
+
+  // #5380 — always join voice muted
+  const moCb = document.getElementById('pref-voice-mute-on-join');
+  if (moCb) {
+    try { moCb.checked = localStorage.getItem('haven_mute_on_join') === '1'; } catch {}
+    moCb.addEventListener('change', () => {
+      try {
+        if (moCb.checked) localStorage.setItem('haven_mute_on_join', '1');
+        else localStorage.removeItem('haven_mute_on_join');
+      } catch {}
+    });
+  }
+
+  // #5380 — listener-only (skip mic) voice mode
+  const loCb = document.getElementById('pref-voice-listener-only');
+  if (loCb) {
+    try { loCb.checked = localStorage.getItem('haven_listener_only') === '1'; } catch {}
+    loCb.addEventListener('change', () => {
+      try {
+        if (loCb.checked) localStorage.setItem('haven_listener_only', '1');
+        else localStorage.removeItem('haven_listener_only');
+      } catch {}
+    });
+  }
 },
 
 // ── Image Display Mode Picker ──

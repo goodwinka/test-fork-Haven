@@ -191,6 +191,21 @@ async switchChannel(code) {
   this.socket.emit('get-messages', { code });
   this.socket.emit('get-channel-members', { code });
   this.socket.emit('request-voice-users', { code });
+  // Safety net (#post-sleep-channel-desync round 2): if message-history
+  // doesn't arrive within 5 s for the channel we just switched to, the
+  // socket is likely a zombie (silent disconnect, write buffered but not
+  // flushed). Force a full resync — the 'connect' handler will re-emit
+  // enter-channel + get-messages and unstick the empty chat view. Cleared
+  // by the message-history listener in app-socket.js when a response for
+  // this code arrives.
+  if (this._switchChannelSafetyTimer) clearTimeout(this._switchChannelSafetyTimer);
+  this._pendingChannelHistoryCode = code;
+  this._switchChannelSafetyTimer = setTimeout(() => {
+    if (this._pendingChannelHistoryCode === code && this.currentChannel === code) {
+      console.warn(`[switch-channel] no message-history for ${code} within 5s — forcing resync`);
+      this._forceFullResync?.('switch-channel-timeout');
+    }
+  }, 5000);
   this._clearReply();
   this._closeThread();
 
