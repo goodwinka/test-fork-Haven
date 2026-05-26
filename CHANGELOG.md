@@ -18,6 +18,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Haven uses [Sema
 
 ---
 
+## [3.17.3] — 2026-05-26
+
+### Fixed
+- **Mobile "Join Voice" button stayed visible after joining a voice channel (#5387).** The mobile-only floating join button was hidden via `style.display = 'none'` in JS, but `style.css` declares `.mobile-voice-join { display: flex !important; }` inside the `@media (max-width: 768px)` block. `!important` won the cascade so the button kept showing while the user was already in the call. The same race could leave it hidden after leaving in some channel-switch paths. Now uses `setProperty('display', 'none', 'important')` when hiding and `removeProperty('display')` when showing, so the inline style actually beats the stylesheet's `!important` rule and the regular media-query default is restored when in-call state ends. Applied in `app-voice.js` and three places in `app-channels.js` that toggle the same element during channel switches and welcome-screen returns.
+- **Language preference didn't always switch the UI (#5386).** Picking a new language in Settings persisted the choice to `localStorage` but only re-applied translations on elements with `data-i18n` attributes already present in the DOM. Anything rendered dynamically by JS (modals, picker entries, button labels that were templated, toasts) kept its previous-language text until the next full reload. `setLocale()` now persists the choice immediately, then triggers a single `window.location.reload()` so every dynamically-built string comes back in the new language. Defensive: `localStorage` is written *before* the locale fetch so a network blip on the locale JSON can't lose the user's selection.
+
+### Added
+- **Admin setting: Default Language (#5386).** New `default_locale` server setting (under Admin → Server Settings → Default Theme) lets admins pick the language new users see on their first visit before they've touched the language picker. Choices match the supported set (English, French, German, Spanish, Polish, Russian, Chinese) plus an "Auto-detect (browser)" default. Exposed unauthenticated via `/api/public-config` so `i18n._detect()` can consult it before falling back to the browser's `navigator.language`. Once a user picks their own language it wins from then on — the admin default only fires on first contact.
+- **Screen-share audio: full-fidelity by default for music / game audio (#5379).** Sharing screen audio used to apply the same Chromium voice processing chain (echo cancellation, noise suppression, auto gain control) as the microphone, which mangled music and game audio into a flat, low-bitrate-sounding stream. Those filters are now disabled unconditionally on the `getDisplayMedia` audio track (the previous opt-in debug toggle has been removed). The microphone is on a separate `getUserMedia` stream and still gets the voice-processing pipeline — only the system-audio capture from your screen share is full-fidelity now.
+
+### Notes
+- 3.17.3 also bundles the Haven Desktop 1.4.17 release, which addresses a screen-share encoder stall when the desktop window is hidden behind another full-size window. Desktop changelog: see `Haven-Desktop/CHANGELOG.md`.
+
+---
+
 ## [3.17.2] — 2026-05-25
 
 ### Fixed
