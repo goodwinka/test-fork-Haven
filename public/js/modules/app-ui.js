@@ -1014,6 +1014,10 @@ _setupUI() {
     const appBody = document.getElementById('app-body');
     if (window.innerWidth <= 900 && appBody) {
       appBody.classList.add('mobile-right-open');
+      // Activate the mobile-overlay backdrop too, so tap-outside-to-close
+      // works the same way as it does for the Members button. Without this
+      // the sidebar slides in but the dim overlay never appears (#5385).
+      document.getElementById('mobile-overlay')?.classList.add('active');
     }
   });
 
