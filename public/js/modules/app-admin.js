@@ -348,6 +348,10 @@ _applyServerSettings() {
     if (maxEmojiKb) {
       maxEmojiKb.value = this.serverSettings.max_emoji_kb || '256';
     }
+    const maxStickerKb = document.getElementById('max-sticker-kb');
+    if (maxStickerKb) {
+      maxStickerKb.value = this.serverSettings.max_sticker_kb || '1024';
+    }
     const maxPollOpts = document.getElementById('max-poll-options');
     if (maxPollOpts) {
       maxPollOpts.value = this.serverSettings.max_poll_options || '10';
@@ -363,6 +367,10 @@ _applyServerSettings() {
     const whitelistToggle = document.getElementById('whitelist-enabled');
     if (whitelistToggle) {
       whitelistToggle.checked = this.serverSettings.whitelist_enabled === 'true';
+    }
+    const adminPwReset = document.getElementById('admin-password-reset-enabled');
+    if (adminPwReset) {
+      adminPwReset.checked = this.serverSettings.admin_password_reset_enabled === 'true';
     }
 
     // ── Auto-backup form ───
@@ -386,6 +394,10 @@ _applyServerSettings() {
     const defaultTheme = document.getElementById('default-theme-select');
     if (defaultTheme) {
       defaultTheme.value = this.serverSettings.default_theme || '';
+    }
+    const defaultLocale = document.getElementById('default-locale-select');
+    if (defaultLocale) {
+      defaultLocale.value = this.serverSettings.default_locale || '';
     }
     this._renderAdminThemeList();
 
@@ -545,7 +557,8 @@ _syncSettingsNav() {
   const canManageSounds = isAdmin || this._hasPerm('manage_soundboard');
   const canManageRoles = isAdmin || this._hasPerm('manage_roles');
   const canManageServer = isAdmin || this._hasPerm('manage_server');
-  const hasAnyAdminAccess = isAdmin || canManageEmojis || canManageStickers || canManageSounds || canManageRoles || canManageServer;
+  const canManageWebhooks = isAdmin || this._hasPerm('manage_webhooks');
+  const hasAnyAdminAccess = isAdmin || canManageEmojis || canManageStickers || canManageSounds || canManageRoles || canManageServer || canManageWebhooks;
 
   // Show/hide individual admin nav items (default: hidden for non-admins)
   document.querySelectorAll('.settings-nav-admin').forEach(el => {
@@ -614,6 +627,11 @@ _syncSettingsNav() {
       if (navItem) navItem.style.display = '';
     });
   }
+  // Show Bots tab for users with manage_webhooks permission
+  const botsNavItem = document.querySelector('.settings-nav-item[data-target="section-bots"]');
+  if (botsNavItem && !isAdmin && canManageWebhooks) {
+    botsNavItem.style.display = '';
+  }
   // Show Audit Log nav item for users with view_audit_log permission
   const canViewAuditLog = isAdmin || this._hasPerm('view_audit_log');
   const auditNavItem = document.querySelector('.settings-nav-item[data-target="section-audit-log"]');
@@ -643,11 +661,14 @@ _snapshotAdminSettings() {
     max_upload_mb: this.serverSettings.max_upload_mb || '25',
     max_sound_kb: this.serverSettings.max_sound_kb || '1024',
     max_emoji_kb: this.serverSettings.max_emoji_kb || '256',
+    max_sticker_kb: this.serverSettings.max_sticker_kb || '1024',
     max_poll_options: this.serverSettings.max_poll_options || '10',
     session_duration_days: this.serverSettings.session_duration_days || '7',
     max_message_chars: this.serverSettings.max_message_chars || '2000',
     update_banner_admin_only: this.serverSettings.update_banner_admin_only || 'false',
+    admin_password_reset_enabled: this.serverSettings.admin_password_reset_enabled || 'false',
     default_theme: this.serverSettings.default_theme || '',
+    default_locale: this.serverSettings.default_locale || '',
     published_themes: this.serverSettings.published_themes || '[]',
     custom_tos: this.serverSettings.custom_tos || '',
     role_icon_sidebar: this.serverSettings.role_icon_sidebar || 'true',
@@ -657,7 +678,7 @@ _snapshotAdminSettings() {
   const tosEl = document.getElementById('custom-tos-input');
   if (tosEl) tosEl.value = this._adminSnapshot.custom_tos;
   // Load webhooks list for admin preview
-  if (this.user?.isAdmin) {
+  if (this.user?.isAdmin || this._hasPerm('manage_webhooks')) {
     this.socket.emit('get-webhooks');
   }
 },
@@ -737,6 +758,12 @@ _saveAdminSettings() {
     changed = true;
   }
 
+  const maxStickerKb = String(Math.max(256, Math.min(10240, parseInt(document.getElementById('max-sticker-kb')?.value) || 1024)));
+  if (maxStickerKb !== (snap.max_sticker_kb || '1024')) {
+    this.socket.emit('update-server-setting', { key: 'max_sticker_kb', value: maxStickerKb });
+    changed = true;
+  }
+
   const maxPollOpts = String(Math.max(2, Math.min(25, parseInt(document.getElementById('max-poll-options')?.value) || 10)));
   if (maxPollOpts !== (snap.max_poll_options || '10')) {
     this.socket.emit('update-server-setting', { key: 'max_poll_options', value: maxPollOpts });
@@ -761,9 +788,21 @@ _saveAdminSettings() {
     changed = true;
   }
 
+  const adminPwReset = document.getElementById('admin-password-reset-enabled')?.checked ? 'true' : 'false';
+  if (adminPwReset !== (snap.admin_password_reset_enabled || 'false')) {
+    this.socket.emit('update-server-setting', { key: 'admin_password_reset_enabled', value: adminPwReset });
+    changed = true;
+  }
+
   const defaultTheme = document.getElementById('default-theme-select')?.value || '';
   if (defaultTheme !== (snap.default_theme || '')) {
     this.socket.emit('update-server-setting', { key: 'default_theme', value: defaultTheme });
+    changed = true;
+  }
+
+  const defaultLocale = document.getElementById('default-locale-select')?.value || '';
+  if (defaultLocale !== (snap.default_locale || '')) {
+    this.socket.emit('update-server-setting', { key: 'default_locale', value: defaultLocale });
     changed = true;
   }
 
@@ -832,6 +871,8 @@ _cancelAdminSettings() {
     if (msk) msk.value = snap.max_sound_kb || '1024';
     const mek = document.getElementById('max-emoji-kb');
     if (mek) mek.value = snap.max_emoji_kb || '256';
+    const mstk = document.getElementById('max-sticker-kb');
+    if (mstk) mstk.value = snap.max_sticker_kb || '1024';
     const mpo = document.getElementById('max-poll-options');
     if (mpo) mpo.value = snap.max_poll_options || '10';
     const sdd = document.getElementById('session-duration-days');
@@ -842,6 +883,8 @@ _cancelAdminSettings() {
     if (uba) uba.checked = snap.update_banner_admin_only === 'true';
     const dt = document.getElementById('default-theme-select');
     if (dt) dt.value = snap.default_theme || '';
+    const dl = document.getElementById('default-locale-select');
+    if (dl) dl.value = snap.default_locale || '';
     const ct = document.getElementById('custom-tos-input');
     if (ct) ct.value = snap.custom_tos || '';
   }

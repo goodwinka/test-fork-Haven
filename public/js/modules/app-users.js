@@ -102,6 +102,10 @@ _showUserGearMenu(anchorEl, userId, username) {
   if (canMod) items += `<button class="gear-menu-item" data-action="mute">🔇 ${t('users.gear_menu.mute')}</button>`;
   if (isAdmin) items += `<button class="gear-menu-item gear-menu-danger" data-action="ban">⛔ ${t('users.gear_menu.ban')}</button>`;
   if (isAdmin) items += `<button class="gear-menu-item gear-menu-danger" data-action="delete-user">🗑️ ${t('users.gear_menu.delete_user')}</button>`;
+  // Admin password reset (#5300): gated on server setting AND target is not self.
+  if (isAdmin && this.serverSettings?.admin_password_reset_enabled === 'true' && userId !== this.user?.id) {
+    items += `<button class="gear-menu-item gear-menu-danger" data-action="reset-password">🔑 ${t('users.gear_menu.reset_password') || 'Reset Password'}</button>`;
+  }
   if (isAdmin) items += `<div class="gear-menu-divider"></div><button class="gear-menu-item gear-menu-danger" data-action="transfer-admin">🔑 ${t('users.gear_menu.transfer_admin')}</button>`;
 
   const menu = document.createElement('div');
@@ -135,6 +139,8 @@ _showUserGearMenu(anchorEl, userId, username) {
         this._openGearMenuChannelPicker(userId, username, inviteChannels);
       } else if (action === 'transfer-admin') {
         this._confirmTransferAdmin(userId, username);
+      } else if (action === 'reset-password') {
+        this._confirmAdminResetPassword(userId, username);
       } else {
         this._showAdminActionModal(action, userId, username);
       }
@@ -912,7 +918,9 @@ _setVoiceVolume(userId, vol) {
   } catch { /* ignore */ }
 },
 
-// ── Nicknames (client-side only) ──────────────────────
+// ── Nicknames ─────────────────────────────────────────────
+// Stored server-side in user_nicknames (synced on session-info).
+// localStorage acts as a fast local cache only.
 
 _getNickname(userId, fallbackUsername) {
   if (userId && this._nicknames[userId]) return this._nicknames[userId];
@@ -926,6 +934,10 @@ _setNickname(userId, nickname) {
     delete this._nicknames[userId];
   }
   localStorage.setItem('haven_nicknames', JSON.stringify(this._nicknames));
+  // Mirror to server so the nickname survives across devices (#5394).
+  if (this.socket) {
+    this.socket.emit('set-nickname', { targetId: userId, nickname: nickname || null });
+  }
 },
 
 _showNicknameDialog(userId, currentUsername) {

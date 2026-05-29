@@ -63,7 +63,10 @@ async switchChannel(code) {
       const _scJoinBtn = document.getElementById('voice-join-btn');
       if (_scJoinBtn) _scJoinBtn.style.display = (channel && channel.voice_enabled === 0) || !_canVoice ? 'none' : 'inline-flex';
       const mobileJoin = document.getElementById('voice-join-mobile');
-      if (mobileJoin) mobileJoin.style.display = (channel && channel.voice_enabled === 0) || !_canVoice ? 'none' : '';
+      if (mobileJoin) {
+        if ((channel && channel.voice_enabled === 0) || !_canVoice) mobileJoin.style.setProperty('display', 'none', 'important');
+        else mobileJoin.style.removeProperty('display');
+      }
     }
   } else {
     // Show just the join button (not the indicator), but hide it for text-only channels or users without voice permission
@@ -75,7 +78,10 @@ async switchChannel(code) {
     const vp = document.getElementById('voice-panel');
     if (vp) vp.style.display = 'none';
     const mobileJoin = document.getElementById('voice-join-mobile');
-    if (mobileJoin) mobileJoin.style.display = (channel && channel.voice_enabled === 0) || !_canVoice ? 'none' : '';
+    if (mobileJoin) {
+      if ((channel && channel.voice_enabled === 0) || !_canVoice) mobileJoin.style.setProperty('display', 'none', 'important');
+      else mobileJoin.style.removeProperty('display');
+    }
   }
   document.getElementById('search-toggle-btn').style.display = '';
   document.getElementById('pinned-toggle-btn').style.display = '';
@@ -191,6 +197,21 @@ async switchChannel(code) {
   this.socket.emit('get-messages', { code });
   this.socket.emit('get-channel-members', { code });
   this.socket.emit('request-voice-users', { code });
+  // Safety net (#post-sleep-channel-desync round 2): if message-history
+  // doesn't arrive within 5 s for the channel we just switched to, the
+  // socket is likely a zombie (silent disconnect, write buffered but not
+  // flushed). Force a full resync — the 'connect' handler will re-emit
+  // enter-channel + get-messages and unstick the empty chat view. Cleared
+  // by the message-history listener in app-socket.js when a response for
+  // this code arrives.
+  if (this._switchChannelSafetyTimer) clearTimeout(this._switchChannelSafetyTimer);
+  this._pendingChannelHistoryCode = code;
+  this._switchChannelSafetyTimer = setTimeout(() => {
+    if (this._pendingChannelHistoryCode === code && this.currentChannel === code) {
+      console.warn(`[switch-channel] no message-history for ${code} within 5s — forcing resync`);
+      this._forceFullResync?.('switch-channel-timeout');
+    }
+  }, 5000);
   this._clearReply();
   this._closeThread();
 
@@ -295,7 +316,7 @@ _showWelcome() {
   const vp2 = document.getElementById('voice-panel');
   if (vp2) vp2.style.display = 'none';
   const mobileJoin = document.getElementById('voice-join-mobile');
-  if (mobileJoin) mobileJoin.style.display = 'none';
+  if (mobileJoin) mobileJoin.style.setProperty('display', 'none', 'important');
   const actionsBox = document.getElementById('header-actions-box');
   if (actionsBox) actionsBox.style.display = 'none';
   document.getElementById('status-channel').textContent = t('channels.status_none');
@@ -475,11 +496,27 @@ _updateChannelFunctionsPanel(ch) {
   // Announcement channel
   const isAnnouncement = ch.notification_type === 'announcement';
   this._setCfnBadge('announcement', isAnnouncement, isAnnouncement ? 'ON' : 'OFF');
+  // (#5389) Default role badge — show role name when set, else "None".
+  // Hide for DMs since DMs have no role concept.
+  const defaultRoleRow = document.querySelector('.cfn-row[data-fn="default-role"]');
+  if (defaultRoleRow) {
+    defaultRoleRow.style.display = ch.is_dm ? 'none' : '';
+    if (!ch.is_dm) {
+      const drId = ch.default_role_id || null;
+      const role = drId && Array.isArray(this._allRoles)
+        ? this._allRoles.find(r => r.id === drId) : null;
+      this._setCfnBadge('default-role', !!drId, role ? role.name : (drId ? `#${drId}` : 'None'));
+    }
+  }
   // Self Destruct timer
   const hasExpiry = !!ch.expires_at;
   if (hasExpiry) {
     const hoursLeft = Math.max(1, Math.round((new Date(ch.expires_at) - Date.now()) / 3600000));
-    this._setCfnBadge('self-destruct', true, `${hoursLeft}h`);
+    // #5390 — distinguish 'clear messages' mode from full channel deletion
+    // so admins can tell at a glance what the timer will do. The ↻ glyph
+    // hints that the clear timer rearms itself.
+    const isClear = ch.auto_delete_mode === 'clear';
+    this._setCfnBadge('self-destruct', true, isClear ? `${hoursLeft}h ↻` : `${hoursLeft}h`);
   } else {
     this._setCfnBadge('self-destruct', false, 'OFF');
   }

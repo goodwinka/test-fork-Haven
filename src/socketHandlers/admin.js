@@ -37,13 +37,14 @@ module.exports = function register(socket, ctx) {
       'member_visibility', 'cleanup_enabled', 'cleanup_max_age_days', 'cleanup_max_size_mb',
       'giphy_api_key', 'server_name', 'server_title', 'server_icon', 'server_banner', 'permission_thresholds',
       'tunnel_enabled', 'tunnel_provider', 'server_code', 'max_upload_mb', 'max_poll_options',
-      'max_sound_kb', 'max_emoji_kb', 'setup_wizard_complete', 'update_banner_admin_only',
+      'max_sound_kb', 'max_emoji_kb', 'max_sticker_kb', 'setup_wizard_complete', 'update_banner_admin_only',
       'default_theme', 'published_themes', 'channel_sort_mode', 'channel_cat_order', 'channel_cat_sort',
-      'channel_tag_sorts', 'custom_tos', 'welcome_message', 'vanity_code',
+      'channel_tag_sorts', 'custom_tos', 'welcome_message', 'vanity_code', 'default_locale',
       'role_icon_sidebar', 'role_icon_chat', 'role_icon_after_name',
       'auto_backup_enabled', 'auto_backup_interval_hours', 'auto_backup_retention', 'auto_backup_sections',
       'session_duration_days', 'max_message_chars',
-      'default_join_channels', 'registration_token_enabled' // (#5344, #5345) — registration_token has its own generate/clear handlers
+      'default_join_channels', 'registration_token_enabled', // (#5344, #5345), registration_token has its own generate/clear handlers
+      'admin_password_reset_enabled' // (#5300) admin password reset feature gate
     ];
     if (!allowedKeys.includes(key)) return;
 
@@ -56,6 +57,7 @@ module.exports = function register(socket, ctx) {
     if (key === 'max_message_chars') { const n = parseInt(value); if (isNaN(n) || n < 200 || n > 100000) return; }
     if (key === 'max_sound_kb') { const n = parseInt(value); if (isNaN(n) || n < 256 || n > 10240) return; }
     if (key === 'max_emoji_kb') { const n = parseInt(value); if (isNaN(n) || n < 64 || n > 1024) return; }
+    if (key === 'max_sticker_kb') { const n = parseInt(value); if (isNaN(n) || n < 256 || n > 10240) return; }
     if (key === 'session_duration_days') { const n = parseInt(value); if (isNaN(n) || n < 1 || n > 365) return; }
     if (key === 'auto_backup_enabled' && !['true', 'false'].includes(value)) return;
     if (key === 'auto_backup_interval_hours') { const n = parseInt(value); if (isNaN(n) || ![6, 12, 24, 168, 720].includes(n)) return; }
@@ -73,6 +75,7 @@ module.exports = function register(socket, ctx) {
     if (key === 'tunnel_provider' && !['localtunnel', 'cloudflared'].includes(value)) return;
     if (key === 'setup_wizard_complete' && !['true', 'false'].includes(value)) return;
     if (key === 'update_banner_admin_only' && !['true', 'false'].includes(value)) return;
+    if (key === 'admin_password_reset_enabled' && !['true', 'false'].includes(value)) return;
     if (key === 'role_icon_sidebar' && !['true', 'false'].includes(value)) return;
     if (key === 'role_icon_chat' && !['true', 'false'].includes(value)) return;
     if (key === 'role_icon_after_name' && !['true', 'false'].includes(value)) return;
@@ -93,6 +96,10 @@ module.exports = function register(socket, ctx) {
       // Allow built-in names OR "file:name.theme.css" for published custom themes
       const validBuiltin = ['', 'haven', 'discord', 'matrix', 'fallout', 'ffx', 'ice', 'nord', 'darksouls', 'eldenring', 'bloodborne', 'cyberpunk', 'lotr', 'abyss', 'scripture', 'chapel', 'gospel', 'tron', 'halo', 'dracula', 'win95'];
       if (!validBuiltin.includes(value) && !/^file:[a-zA-Z0-9_\-. ]+\.theme\.css$/.test(value)) return;
+    }
+    if (key === 'default_locale') {
+      const validLocales = ['', 'en', 'fr', 'de', 'es', 'pl', 'ru', 'zh'];
+      if (!validLocales.includes(value)) return;
     }
     if (key === 'published_themes') {
       try {
@@ -303,8 +310,7 @@ module.exports = function register(socket, ctx) {
         socket.emit('error-msg', 'Failed to create webhook');
       }
     } else {
-      // Bot-manager variant — admin only
-      if (!socket.user.isAdmin) return socket.emit('error-msg', 'Only admins can manage webhooks');
+      // Bot-manager variant
       const name = typeof data.name === 'string' ? data.name.trim().slice(0, 32) : '';
       const channelId = parseInt(data.channel_id);
       const avatarUrl = typeof data.avatar_url === 'string' ? data.avatar_url.trim().slice(0, 512) : null;
@@ -349,8 +355,7 @@ module.exports = function register(socket, ctx) {
       ).all(channel.id);
       socket.emit('webhooks-list', { channelCode, webhooks });
     } else {
-      // Bot-manager variant (all webhooks) — admin only
-      if (!socket.user.isAdmin) return;
+      // Bot-manager variant (all webhooks)
       const webhooks = db.prepare(`
         SELECT w.id, w.channel_id, w.name, w.token, w.avatar_url, w.is_active, w.created_at,
                w.callback_url, w.callback_secret,
@@ -368,8 +373,6 @@ module.exports = function register(socket, ctx) {
     if (!data || typeof data !== 'object') return;
     const _canWebhooks = socket.user.isAdmin || userHasPermission(socket.user.id, 'manage_webhooks');
     if (!_canWebhooks) return socket.emit('error-msg', 'You don\'t have permission to manage webhooks');
-    // Bot-manager variant (uses data.id only) is admin-only
-    if (!socket.user.isAdmin && !data.webhookId) return socket.emit('error-msg', 'Only admins can manage webhooks');
 
     // Per-channel variant uses webhookId, bot-manager uses id
     const webhookId = parseInt(data.webhookId || data.id);
@@ -400,8 +403,6 @@ module.exports = function register(socket, ctx) {
     if (!data || typeof data !== 'object') return;
     const _canWebhooks2 = socket.user.isAdmin || userHasPermission(socket.user.id, 'manage_webhooks');
     if (!_canWebhooks2) return socket.emit('error-msg', 'You don\'t have permission to manage webhooks');
-    // Bot-manager variant (uses data.id only) is admin-only
-    if (!socket.user.isAdmin && !data.webhookId) return socket.emit('error-msg', 'Only admins can manage webhooks');
 
     const webhookId = parseInt(data.webhookId || data.id);
     if (!webhookId || isNaN(webhookId)) return;
@@ -430,7 +431,7 @@ module.exports = function register(socket, ctx) {
   });
 
   socket.on('update-webhook', (data) => {
-    if (!socket.user.isAdmin) return socket.emit('error-msg', 'Only admins can manage webhooks');
+    if (!socket.user.isAdmin && !userHasPermission(socket.user.id, 'manage_webhooks')) return socket.emit('error-msg', 'You don\'t have permission to manage webhooks');
     if (!data || typeof data !== 'object') return;
     const webhookId = parseInt(data.id);
     if (isNaN(webhookId)) return;
@@ -496,7 +497,7 @@ module.exports = function register(socket, ctx) {
   // 3.13.0 — fire a synthetic test event to a webhook's callback URL so
   // admins can verify the bot is reachable from the admin UI.
   socket.on('test-webhook', (data) => {
-    if (!socket.user.isAdmin) return socket.emit('error-msg', 'Only admins can manage webhooks');
+    if (!socket.user.isAdmin && !userHasPermission(socket.user.id, 'manage_webhooks')) return socket.emit('error-msg', 'You don\'t have permission to manage webhooks');
     if (!data || typeof data !== 'object') return;
     const webhookId = parseInt(data.id || data.webhookId);
     if (isNaN(webhookId)) return;
@@ -669,5 +670,79 @@ module.exports = function register(socket, ctx) {
       console.error('get-audit-log error:', err);
       cb({ error: 'Failed to load audit log' });
     }
+  });
+
+  // ── Admin password reset (#5300) ────────────────────────────
+  // Generates a random 16-char temporary password for the target user,
+  // hashes + saves it, sets must_change_password=1 so the user is forced
+  // through a change-password flow on next login, and returns the
+  // plaintext temp password to the admin once (caller is expected to
+  // copy it and hand it to the user out of band).
+  //
+  // Disabled by default. Admin must explicitly opt-in via the
+  // `admin_password_reset_enabled` server setting — and that toggle is
+  // surfaced in `/api/public-config` so users can see whether the
+  // current admin can reset their password (the trust-and-warning side
+  // of the feature requested in the issue).
+  //
+  // E2E impact: bumping `password_version` invalidates all of the
+  // user's existing JWTs (matching the existing pwv-rejection logic)
+  // and the new password no longer derives the same E2E wrap key, so
+  // encrypted DM history that depended on the old key is unrecoverable
+  // from the user's side. This matches the existing
+  // recovery-codes flow behavior.
+  socket.on('admin-reset-user-password', (data, cb) => {
+    if (typeof cb !== 'function') return;
+    if (!socket.user.isAdmin) return cb({ error: 'Admin only' });
+    const enabled = db.prepare("SELECT value FROM server_settings WHERE key = 'admin_password_reset_enabled'").get();
+    if (!enabled || enabled.value !== 'true') {
+      return cb({ error: 'Admin password reset is disabled in server settings' });
+    }
+    const userId = parseInt(data && data.userId);
+    if (!Number.isFinite(userId)) return cb({ error: 'Invalid userId' });
+    const target = db.prepare('SELECT id, username, password_version, totp_secret, totp_enabled FROM users WHERE id = ?').get(userId);
+    if (!target) return cb({ error: 'User not found' });
+    if (target.id === socket.user.id) return cb({ error: 'Use Settings → Account to change your own password' });
+
+    // MFA gate (#5300 hardening): admin reset is a powerful escalation path
+    // (admin learns user's new login secret), so we require the target to
+    // have TOTP 2FA enabled. This way the temp password alone is not enough
+    // to take over the account — the attacker (or rogue admin) would also
+    // need the TOTP device. Without this, an admin with reset enabled could
+    // silently impersonate any user.
+    if (!target.totp_secret || !target.totp_enabled) {
+      return cb({ error: 'Target user must enable two-factor authentication before an admin can reset their password (security requirement).', code: 'mfa_required' });
+    }
+
+    // 16 hex chars, grouped as XXXX-XXXX-XXXX-XXXX for readability.
+    const raw = crypto.randomBytes(8).toString('hex').toUpperCase();
+    const tempPw = `${raw.slice(0,4)}-${raw.slice(4,8)}-${raw.slice(8,12)}-${raw.slice(12,16)}`;
+    let hash;
+    try {
+      const bcrypt = require('bcryptjs');
+      hash = bcrypt.hashSync(tempPw, 10);
+    } catch (err) {
+      console.error('admin-reset-user-password hash error:', err);
+      return cb({ error: 'Server error' });
+    }
+    const newPwv = (target.password_version || 1) + 1;
+    // DM-preservation escape hatch (#5300): write the temp hash to
+    // `temp_password_hash` instead of overwriting `password_hash`. Login
+    // accepts either hash; logging in with the original password silently
+    // clears the temp hash and the must_change_password flag, leaving the
+    // E2E wrap key intact. Only the forced change-password flow (which
+    // only fires when the user logs in with the temp pw) rotates
+    // `password_hash`, at which point DM history becomes unrecoverable.
+    db.prepare('UPDATE users SET temp_password_hash = ?, password_version = ?, must_change_password = 1 WHERE id = ?')
+      .run(hash, newPwv, target.id);
+
+    if (typeof logAudit === 'function') {
+      logAudit({
+        actor: socket.user, action: 'admin_password_reset',
+        target_type: 'user', target_id: target.id, target_name: target.username,
+        details: { reason: typeof data?.reason === 'string' ? data.reason.slice(0, 200) : '' }
+      });
+    }
+    cb({ ok: true, username: target.username, tempPassword: tempPw });
   });
 };

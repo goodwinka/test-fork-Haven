@@ -11,38 +11,26 @@ module.exports = function register(socket, ctx) {
     handleVoiceLeave, broadcastVoiceUsers, generateChannelCode,
     applyRoleChannelAccess, logAudit, fireWebhookEvent
   } = ctx;
-  const { channelUsers, voiceUsers, activeMusic, musicQueues, activeScreenSharers, streamViewers } = state;
+  const { channelUsers, voiceUsers, activeMusic, musicQueues } = state;
   const _audit = (typeof logAudit === 'function') ? logAudit : () => {};
 
-
-  function emitStreamInfoSnapshot(code) {
-    const voiceRoom = voiceUsers.get(code);
-    const sharers = activeScreenSharers.get(code);
-    const streams = [];
-    if (sharers) {
-      for (const sharerId of sharers) {
-        const sharerInfo = voiceRoom ? voiceRoom.get(sharerId) : null;
-        const viewers = streamViewers.get(`${code}:${sharerId}`);
-        const viewerList = [];
-        if (viewers && voiceRoom) {
-          for (const vid of viewers) {
-            const vInfo = voiceRoom.get(vid);
-            if (vInfo) viewerList.push({ id: vid, username: vInfo.username });
-          }
-        }
-        streams.push({
-          sharerId,
-          sharerName: sharerInfo ? sharerInfo.username : 'Unknown',
-          viewers: viewerList,
-          userId: sharerId,
-          username: sharerInfo ? sharerInfo.username : 'Unknown',
-          type: 'screen',
-          viewerIds: viewers ? Array.from(viewers) : []
-        });
+  // (#5389) Auto-grant a channel's default_role_id to a user when they join
+  // or are added to that channel. No-op if the channel has no default role.
+  // Safe to call repeatedly — INSERT OR IGNORE avoids duplicates.
+  const _applyChannelDefaultRole = (channelId, userId, grantedBy = null) => {
+    try {
+      const row = db.prepare('SELECT default_role_id FROM channels WHERE id = ?').get(channelId);
+      if (!row || !row.default_role_id) return;
+      db.prepare(
+        'INSERT OR IGNORE INTO user_roles (user_id, role_id, channel_id, granted_by) VALUES (?, ?, ?, ?)'
+      ).run(userId, row.default_role_id, channelId, grantedBy);
+      if (typeof applyRoleChannelAccess === 'function') {
+        try { applyRoleChannelAccess(row.default_role_id, userId, 'grant'); } catch { /* non-critical */ }
       }
+    } catch (e) {
+      console.warn('applyChannelDefaultRole failed:', e.message);
     }
-    socket.emit('stream-info', { channelCode: code, streams });
-  }
+  };
 
   // ── Get user's channels ─────────────────────────────────
   socket.on('get-channels', () => {
@@ -241,11 +229,13 @@ module.exports = function register(socket, ctx) {
     const _doAutoJoin = () => {
       const { parents, allowSet } = _resolveAutoJoinChannels();
       const insertMember = db.prepare('INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)');
+      const joinedChannelIds = [];
       let joinedCount = 0;
       const txn = db.transaction(() => {
         for (const parent of parents) {
           insertMember.run(parent.id, socket.user.id);
           socket.join(`channel:${parent.code}`);
+          joinedChannelIds.push(parent.id);
           joinedCount++;
           // Sub-channels: never grant private subs via invite. When a
           // default-channels allowlist is set, only grant subs whose
@@ -254,11 +244,14 @@ module.exports = function register(socket, ctx) {
           for (const sub of subs) {
             insertMember.run(sub.id, socket.user.id);
             socket.join(`channel:${sub.code}`);
+            joinedChannelIds.push(sub.id);
             joinedCount++;
           }
         }
       });
       txn();
+      // (#5389) Apply each channel's default role after membership is settled.
+      for (const chId of joinedChannelIds) _applyChannelDefaultRole(chId, socket.user.id);
       return joinedCount;
     };
 
@@ -318,6 +311,9 @@ module.exports = function register(socket, ctx) {
           applyRoleChannelAccess(ar.id, socket.user.id, 'grant');
         }
       } catch { /* non-critical */ }
+
+      // (#5389) Per-channel default role auto-grant.
+      _applyChannelDefaultRole(channel.id, socket.user.id);
     }
 
     if (!channel.parent_channel_id) {
@@ -328,6 +324,7 @@ module.exports = function register(socket, ctx) {
       subs.forEach(sub => {
         insertSub.run(sub.id, socket.user.id);
         socket.join(`channel:${sub.code}`);
+        _applyChannelDefaultRole(sub.id, socket.user.id);
       });
     }
 
@@ -346,7 +343,11 @@ module.exports = function register(socket, ctx) {
           if (roomSockets) {
             for (const sid of [...roomSockets]) {
               const s = io.sockets.sockets.get(sid);
-              if (s) { s.leave(oldRoom); s.join(newRoom); }
+              if (s) {
+                s.leave(oldRoom);
+                s.join(newRoom);
+                if (s.currentChannel === code) s.currentChannel = newCode;
+              }
             }
           }
           if (channelUsers.has(code)) {
@@ -466,7 +467,6 @@ module.exports = function register(socket, ctx) {
     });
 
     emitOnlineUsers(code);
-    emitStreamInfoSnapshot(code);
   });
 
   // ── Delete channel ──────────────────────────────────────
@@ -736,6 +736,64 @@ module.exports = function register(socket, ctx) {
     }
   });
 
+  // (#5389) Per-channel default role. Setting it auto-grants the role
+  // (channel-scoped) to every existing member and every future joiner.
+  // Clearing it (roleId = null/0) leaves existing grants alone — admins can
+  // revoke from the Roles UI if they want to strip them.
+  socket.on('set-channel-default-role', (data) => {
+    if (!data || typeof data !== 'object') return;
+    if (!socket.user.isAdmin && !userHasPermission(socket.user.id, 'manage_roles')) {
+      return socket.emit('error-msg', 'You don\'t have permission to set a default role');
+    }
+    const code = typeof data.code === 'string' ? data.code.trim() : '';
+    if (!code || !/^[a-f0-9]{8}$/i.test(code)) return;
+    const channel = db.prepare('SELECT id FROM channels WHERE code = ? AND is_dm = 0').get(code);
+    if (!channel) return socket.emit('error-msg', 'Channel not found');
+
+    let roleId = null;
+    if (data.roleId !== null && data.roleId !== undefined && data.roleId !== 0 && data.roleId !== '') {
+      const parsed = parseInt(data.roleId, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        return socket.emit('error-msg', 'Invalid role');
+      }
+      const role = db.prepare('SELECT id, name FROM roles WHERE id = ?').get(parsed);
+      if (!role) return socket.emit('error-msg', 'Role not found');
+      roleId = role.id;
+    }
+
+    try {
+      db.prepare('UPDATE channels SET default_role_id = ? WHERE id = ?').run(roleId, channel.id);
+
+      if (roleId) {
+        // Backfill: grant the new default to every current member of this
+        // channel. INSERT OR IGNORE protects against duplicates if any
+        // member already holds the role channel-scoped.
+        const members = db.prepare('SELECT user_id FROM channel_members WHERE channel_id = ?').all(channel.id);
+        const insertRole = db.prepare(
+          'INSERT OR IGNORE INTO user_roles (user_id, role_id, channel_id, granted_by) VALUES (?, ?, ?, ?)'
+        );
+        const txn = db.transaction(() => {
+          for (const m of members) insertRole.run(m.user_id, roleId, channel.id, socket.user.id);
+        });
+        txn();
+        if (typeof applyRoleChannelAccess === 'function') {
+          for (const m of members) {
+            try { applyRoleChannelAccess(roleId, m.user_id, 'grant'); } catch { /* non-critical */ }
+          }
+        }
+      }
+
+      broadcastChannelLists();
+      io.to(`channel:${code}`).emit('channel-default-role-updated', { code, roleId });
+      socket.emit('toast', { message: roleId ? 'Default role set' : 'Default role cleared', type: 'success' });
+      _audit({ actor: socket.user, action: 'channel_default_role_set',
+        target_type: 'channel', target_id: channel.id, details: { code, roleId } });
+    } catch (err) {
+      console.error('Set default role error:', err);
+      socket.emit('error-msg', 'Failed to set default role');
+    }
+  });
+
   socket.on('set-sort-alphabetical', (data) => {
     if (!data || typeof data !== 'object') return;
     if (!socket.user.isAdmin && !userHasPermission(socket.user.id, 'create_channel')) return socket.emit('error-msg', 'You don\'t have permission to change sort settings');
@@ -815,18 +873,28 @@ module.exports = function register(socket, ctx) {
     if (!code || !/^[a-f0-9]{8}$/i.test(code)) return;
     const channel = db.prepare('SELECT id FROM channels WHERE code = ? AND is_dm = 0').get(code);
     if (!channel) return socket.emit('error-msg', 'Channel not found');
+    // #5390 — second mode: 'clear' wipes messages periodically instead of
+    // deleting the whole channel. Anything other than 'clear' is treated
+    // as the legacy 'delete' behaviour so unknown values fail closed
+    // toward the original semantics.
+    const mode = data.mode === 'clear' ? 'clear' : 'delete';
     let expiresAt = null;
+    let intervalHours = null;
     if (data.hours && data.hours > 0) {
       const hours = Math.max(1, Math.min(720, parseInt(data.hours, 10)));
       if (isNaN(hours)) return socket.emit('error-msg', 'Invalid duration');
       expiresAt = new Date(Date.now() + hours * 3600000).toISOString();
+      intervalHours = hours;
     }
     try {
-      db.prepare('UPDATE channels SET expires_at = ? WHERE id = ?').run(expiresAt, channel.id);
+      db.prepare(
+        'UPDATE channels SET expires_at = ?, auto_delete_mode = ?, auto_delete_interval_hours = ? WHERE id = ?'
+      ).run(expiresAt, mode, intervalHours, channel.id);
       broadcastChannelLists();
       if (expiresAt) {
         const hours = Math.round((new Date(expiresAt) - Date.now()) / 3600000);
-        socket.emit('toast', { message: `⏱️ Channel will self-destruct in ${hours}h`, type: 'success' });
+        const verb = mode === 'clear' ? `clear messages every ${hours}h` : `self-destruct in ${hours}h`;
+        socket.emit('toast', { message: `⏱️ Channel will ${verb}`, type: 'success' });
       } else {
         socket.emit('toast', { message: '⏱️ Self-destruct timer removed', type: 'success' });
       }
@@ -1091,7 +1159,11 @@ module.exports = function register(socket, ctx) {
     if (roomSockets) {
       for (const sid of [...roomSockets]) {
         const s = io.sockets.sockets.get(sid);
-        if (s) { s.leave(oldRoom); s.join(newRoom); }
+        if (s) {
+          s.leave(oldRoom);
+          s.join(newRoom);
+          if (s.currentChannel === oldCode) s.currentChannel = newCode;
+        }
       }
     }
     if (channelUsers.has(oldCode)) {

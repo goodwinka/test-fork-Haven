@@ -508,7 +508,14 @@ _appendMessages(messages) {
       // Link to existing last message for grouping
       const lastEl = container.lastElementChild;
       if (lastEl && lastEl.dataset && lastEl.dataset.userId && lastEl.dataset.msgId) {
-        prevMsg = { user_id: parseInt(lastEl.dataset.userId), created_at: lastEl.dataset.time, persona_id: lastEl.dataset.personaId ? parseInt(lastEl.dataset.personaId) : null };
+        prevMsg = {
+          user_id: parseInt(lastEl.dataset.userId),
+          created_at: lastEl.dataset.time,
+          persona_id: lastEl.dataset.personaId ? parseInt(lastEl.dataset.personaId) : null,
+          persona_username: lastEl.dataset.personaUsername || null,
+          username: lastEl.dataset.username || null,
+          break_chain: lastEl.dataset.breakChain ? 1 : 0,
+        };
       }
     }
     fragment.appendChild(this._createMessageEl(msg, prevMsg));
@@ -576,6 +583,9 @@ _appendMessage(message, forceScroll = false) {
       user_id: parseInt(lastMsg.dataset.userId),
       created_at: lastMsg.dataset.time,
       persona_id: lastMsg.dataset.personaId ? parseInt(lastMsg.dataset.personaId) : null,
+      persona_username: lastMsg.dataset.personaUsername || null,
+      username: lastMsg.dataset.username || null,
+      break_chain: lastMsg.dataset.breakChain ? 1 : 0,
     };
   }
 
@@ -636,8 +646,15 @@ _createMessageEl(msg, prevMsg) {
     prevMsg.user_id === msg.user_id &&
     // Persona / webhook / Discord-imported messages must each break the
     // grouping chain so a different persona under the same account doesn't
-    // get folded under the previous persona's avatar. (#5349 follow-up)
+    // get folded under the previous persona's avatar. (#5349 follow-up,
+    // #5393 defence-in-depth: also compare persona_username and the
+    // displayed username so a missing persona_id field can't sneak two
+    // different personas into a single compact group.)
     (prevMsg.persona_id || null) === (msg.persona_id || null) &&
+    (prevMsg.persona_username || null) === (msg.persona_username || null) &&
+    (prevMsg.username || null) === (msg.username || null) &&
+    // /break and the persisted break_chain flag (#5393) hard-stop grouping.
+    !msg.break_chain && !prevMsg.break_chain &&
     (prevMsg.is_webhook ? 1 : 0) === (msg.is_webhook ? 1 : 0) &&
     (prevMsg.webhook_username || null) === (msg.webhook_username || null) &&
     (prevMsg.imported_from || null) === (msg.imported_from || null) &&
@@ -677,7 +694,11 @@ _createMessageEl(msg, prevMsg) {
     // Message links contain the DM channel code - never expose them in DM context.
     ...(isDmContext ? [] : [{ key: 'copy-link', html: `<button data-action="copy-link" title="${t('msg_toolbar.copy_link') || 'Copy link to message'}">${iLink}</button>` }])
   ];
-  const canPin = this.user.isAdmin || this._canModerate();
+  // Gate pin/unpin on the explicit `pin_message` permission so granting it via
+  // a role (without making the user a moderator) actually shows the button.
+  // Previously gated on _canModerate() (level >= 25), which made the role
+  // toggle look broken because users with only `pin_message` saw nothing.
+  const canPin = this.user.isAdmin || this._hasPerm('pin_message');
   const canArchive = this.user.isAdmin || this._hasPerm('archive_messages');
   const canDelete = msg.user_id === this.user.id || this.user.isAdmin || this._canModerate();
   if (canPin) {
@@ -749,6 +770,8 @@ _createMessageEl(msg, prevMsg) {
     el.dataset.msgId = msg.id;
     el.dataset.rawContent = msg.content;
     if (msg.persona_id) el.dataset.personaId = String(msg.persona_id);
+    if (msg.persona_username) el.dataset.personaUsername = msg.persona_username;
+    if (msg.break_chain) el.dataset.breakChain = '1';
     if (msg.pinned) el.dataset.pinned = '1';
     if (msg.is_archived) el.dataset.archived = '1';
     if (msg._e2e) el.dataset.e2e = '1';
@@ -850,11 +873,14 @@ _createMessageEl(msg, prevMsg) {
   // different personas under the same user).
   if (prevMsg && (prevMsg.user_id !== msg.user_id || (prevMsg.persona_id || null) !== (msg.persona_id || null))) el.classList.add('message-user-sep');
   el.dataset.userId = msg.user_id;
+  el.dataset.username = msg.username;
   el.dataset.time = msg.created_at;
   el.dataset.timeShort = new Date(msg.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
   el.dataset.msgId = msg.id;
   el.dataset.rawContent = msg.content;
   if (msg.persona_id) el.dataset.personaId = String(msg.persona_id);
+  if (msg.persona_username) el.dataset.personaUsername = msg.persona_username;
+  if (msg.break_chain) el.dataset.breakChain = '1';
   if (msg.pinned) el.dataset.pinned = '1';
   if (msg.is_archived) el.dataset.archived = '1';
   if (msg._e2e) el.dataset.e2e = '1';

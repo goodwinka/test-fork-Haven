@@ -460,6 +460,53 @@ _setupUI() {
       const newType = isAnnouncement ? 'default' : 'announcement';
       optimistic({ notification_type: newType });
       this.socket.emit('set-notification-type', { code, type: newType });
+    } else if (fn === 'default-role') {
+      // (#5389) Dropdown of available server roles. Selecting one fires
+      // set-channel-default-role; selecting "None" clears the default.
+      if (row.querySelector('.cfn-select')) return;
+      const badge = row.querySelector('.cfn-badge');
+      if (!badge) return;
+      // Lazy-fetch roles if we haven't yet (e.g. admin opened the panel
+      // before visiting the Roles page).
+      const _open = () => {
+        const roles = Array.isArray(this._allRoles) ? this._allRoles : [];
+        const select = document.createElement('select');
+        select.className = 'cfn-select cfn-input';
+        select.onclick = e2 => e2.stopPropagation();
+        const noneOpt = document.createElement('option');
+        noneOpt.value = ''; noneOpt.textContent = 'None';
+        select.appendChild(noneOpt);
+        for (const r of roles) {
+          const opt = document.createElement('option');
+          opt.value = String(r.id);
+          opt.textContent = r.name;
+          if (ch && r.id === ch.default_role_id) opt.selected = true;
+          select.appendChild(opt);
+        }
+        badge.replaceWith(select);
+        select.focus();
+        let committed = false;
+        const commit = () => {
+          if (committed) return;
+          committed = true;
+          const raw = select.value;
+          const roleId = raw ? parseInt(raw, 10) : null;
+          optimistic({ default_role_id: roleId });
+          this.socket.emit('set-channel-default-role', { code, roleId });
+        };
+        select.addEventListener('change', () => { commit(); select.blur(); });
+        select.addEventListener('blur', () => {
+          if (!committed) this._updateChannelFunctionsPanel(ch);
+        });
+      };
+      if (Array.isArray(this._allRoles) && this._allRoles.length) {
+        _open();
+      } else {
+        this.socket.emit('get-roles', {}, (res) => {
+          if (res && Array.isArray(res.roles)) this._allRoles = res.roles;
+          _open();
+        });
+      }
     } else if (fn === 'user-limit') {
       // If an input is already showing, don't open another
       if (row.querySelector('.cfn-input')) return;
@@ -511,27 +558,59 @@ _setupUI() {
       if (row.querySelector('.cfn-input')) return;
       const badge = row.querySelector('.cfn-badge');
       if (!badge) return;
+      // #5390 — self-destruct now has two modes: 'delete' (legacy: remove
+      // the whole channel when the timer fires) and 'clear' (wipe messages
+      // only, then rearm the timer at the same interval). We render the
+      // hours input next to a mode select so admins can pick both at once.
+      const wrap = document.createElement('span');
+      wrap.className = 'cfn-input-wrap';
       const input = document.createElement('input');
       input.type = 'number'; input.min = '0'; input.max = '720';
-      input.value = ''; input.placeholder = t('channel_functions.self_destruct_placeholder'); input.className = 'cfn-input';
+      input.value = ''; input.placeholder = t('channel_functions.self_destruct_placeholder'); input.className = 'cfn-input cfn-input-hours';
       input.onclick = e2 => e2.stopPropagation();
-      badge.replaceWith(input);
+      const modeSelect = document.createElement('select');
+      modeSelect.className = 'cfn-input cfn-mode-select';
+      const optDelete = document.createElement('option');
+      optDelete.value = 'delete';
+      optDelete.textContent = t('channel_functions.self_destruct_mode_delete') || 'Delete channel';
+      const optClear = document.createElement('option');
+      optClear.value = 'clear';
+      optClear.textContent = t('channel_functions.self_destruct_mode_clear') || 'Clear messages';
+      modeSelect.appendChild(optDelete);
+      modeSelect.appendChild(optClear);
+      modeSelect.value = ch?.auto_delete_mode === 'clear' ? 'clear' : 'delete';
+      modeSelect.onclick = e2 => e2.stopPropagation();
+      wrap.appendChild(input);
+      wrap.appendChild(modeSelect);
+      badge.replaceWith(wrap);
       input.focus(); input.select();
+      let committed = false;
       const commitExpiry = () => {
+        if (committed) return;
         const hours = parseInt(input.value);
         if (isNaN(hours) || hours < 0) return;
+        committed = true;
+        const mode = modeSelect.value === 'clear' ? 'clear' : 'delete';
         if (hours === 0) {
-          optimistic({ expires_at: null });
-          this.socket.emit('set-channel-expiry', { code, hours: 0 });
+          optimistic({ expires_at: null, auto_delete_mode: 'delete', auto_delete_interval_hours: null });
+          this.socket.emit('set-channel-expiry', { code, hours: 0, mode });
         } else {
           const clamped = Math.max(1, Math.min(720, hours));
           const expiresAt = new Date(Date.now() + clamped * 3600000).toISOString();
-          optimistic({ expires_at: expiresAt });
-          this.socket.emit('set-channel-expiry', { code, hours: clamped });
+          optimistic({ expires_at: expiresAt, auto_delete_mode: mode, auto_delete_interval_hours: clamped });
+          this.socket.emit('set-channel-expiry', { code, hours: clamped, mode });
         }
       };
+      // Delay blur-commit briefly so focus moving between input and select
+      // inside the wrap doesn't fire a premature commit with stale values.
+      const onBlur = () => {
+        setTimeout(() => {
+          if (!wrap.contains(document.activeElement)) commitExpiry();
+        }, 50);
+      };
       input.addEventListener('keydown', e2 => { if (e2.key === 'Enter') { commitExpiry(); input.blur(); } });
-      input.addEventListener('blur', commitExpiry);
+      input.addEventListener('blur', onBlur);
+      modeSelect.addEventListener('blur', onBlur);
     } else if (fn === 'afk-sub') {
       // Show a select dropdown of sub-channels for this parent
       if (row.querySelector('.cfn-select')) return;
@@ -1014,6 +1093,10 @@ _setupUI() {
     const appBody = document.getElementById('app-body');
     if (window.innerWidth <= 900 && appBody) {
       appBody.classList.add('mobile-right-open');
+      // Activate the mobile-overlay backdrop too, so tap-outside-to-close
+      // works the same way as it does for the Members button. Without this
+      // the sidebar slides in but the dim overlay never appears (#5385).
+      document.getElementById('mobile-overlay')?.classList.add('active');
     }
   });
 
@@ -1474,6 +1557,93 @@ _setupUI() {
       document.querySelectorAll('#media-gallery-modal .media-tab').forEach(b => b.classList.toggle('active', b === btn));
       this._mediaGalleryActiveTab = btn.dataset.tab;
       if (this._mediaGalleryData) this._renderMediaGalleryTab(this._mediaGalleryActiveTab);
+      // Switching tabs clears selection — selecting items across tabs and
+      // hitting Delete would be confusing since each tab has its own scope.
+      if (this._mediaGallerySelected) this._mediaGallerySelected.clear();
+      this._refreshMediaGalleryToolbar();
+    });
+  });
+
+  // ── Sort dropdown (#5375) ──
+  const sortSel = document.getElementById('media-gallery-sort');
+  if (sortSel) {
+    // Persist last-used sort so users don't have to re-pick it each session
+    try {
+      const saved = localStorage.getItem('mediaGallerySort');
+      if (saved) { sortSel.value = saved; this._mediaGallerySort = saved; }
+      else this._mediaGallerySort = 'date-desc';
+    } catch { this._mediaGallerySort = 'date-desc'; }
+    sortSel.addEventListener('change', () => {
+      this._mediaGallerySort = sortSel.value || 'date-desc';
+      try { localStorage.setItem('mediaGallerySort', this._mediaGallerySort); } catch {}
+      if (this._mediaGalleryData) this._renderMediaGalleryTab(this._mediaGalleryActiveTab || 'photos');
+    });
+  }
+
+  // ── Select / multi-delete bar (#5375) ──
+  const selToggle = document.getElementById('media-gallery-select-toggle');
+  const selAll    = document.getElementById('media-gallery-select-all');
+  const delBtn    = document.getElementById('media-gallery-delete');
+  if (selToggle) selToggle.addEventListener('click', () => {
+    this._mediaGallerySelectMode = !this._mediaGallerySelectMode;
+    if (!this._mediaGallerySelectMode && this._mediaGallerySelected) this._mediaGallerySelected.clear();
+    this._refreshMediaGalleryToolbar();
+    if (this._mediaGalleryData) this._renderMediaGalleryTab(this._mediaGalleryActiveTab || 'photos');
+  });
+  if (selAll) selAll.addEventListener('click', () => {
+    if (!this._mediaGalleryData || !this._mediaGallerySelectMode) return;
+    const tab = this._mediaGalleryActiveTab || 'photos';
+    if (tab === 'links') return; // not deletable
+    const items = this._mediaGalleryData[tab] || [];
+    const selected = this._mediaGallerySelected || (this._mediaGallerySelected = new Map());
+    // Toggle: if everything in this tab is already selected, clear; else add all
+    const allSelected = items.length > 0 && items.every(it => selected.has(this._mediaItemKey(it)));
+    if (allSelected) {
+      items.forEach(it => selected.delete(this._mediaItemKey(it)));
+    } else {
+      items.forEach(it => selected.set(this._mediaItemKey(it), { message_id: it.message_id, url: it.url }));
+    }
+    this._refreshMediaGalleryToolbar();
+    this._renderMediaGalleryTab(tab);
+  });
+  if (delBtn) delBtn.addEventListener('click', () => {
+    if (!this._mediaGallerySelected || this._mediaGallerySelected.size === 0) return;
+    if (!this.currentChannel) return;
+    const count = this._mediaGallerySelected.size;
+    const ok = confirm(
+      (window.t && t('media_gallery.confirm_delete', { count })) ||
+      `Delete ${count} selected item${count === 1 ? '' : 's'}? The underlying messages will be removed for everyone. This cannot be undone.`
+    );
+    if (!ok) return;
+    // Build messageIds (one delete per message — bulk endpoint dedupes
+    // server-side too). Group attachment URLs per message id so E2E DM
+    // attachments can be moved to deleted-attachments/ even though the
+    // server can't read the ciphertext.
+    const messageIds = [];
+    const attachmentsByMessage = {};
+    for (const { message_id, url } of this._mediaGallerySelected.values()) {
+      if (!messageIds.includes(message_id)) messageIds.push(message_id);
+      if (!attachmentsByMessage[message_id]) attachmentsByMessage[message_id] = [];
+      if (url && url.startsWith('/uploads/')) attachmentsByMessage[message_id].push(url);
+    }
+    delBtn.disabled = true;
+    this.socket.emit('delete-channel-media', {
+      code: this.currentChannel,
+      messageIds,
+      attachmentsByMessage,
+    }, (res) => {
+      delBtn.disabled = false;
+      if (!res || res.error) {
+        if (this._showToast) this._showToast(res?.error || 'Delete failed', 'error');
+        else alert(res?.error || 'Delete failed');
+        return;
+      }
+      if (this._showToast) this._showToast(`Deleted ${res.deleted || 0}${res.skipped ? ` (${res.skipped} skipped)` : ''}`, 'info');
+      // Clear selection, exit select mode, and refresh data
+      if (this._mediaGallerySelected) this._mediaGallerySelected.clear();
+      this._mediaGallerySelectMode = false;
+      this._refreshMediaGalleryToolbar();
+      this.socket.emit('get-channel-media', { code: this.currentChannel });
     });
   });
 
@@ -4306,11 +4476,21 @@ _renderManageServersList() {
   });
 },
 
-_updateServerBadgeDots(badges) {
-  if (!badges) return;
+_updateServerBadgeDots(payload) {
+  if (!payload) return;
+  // Payload shape evolved: old code sent `{ url: bool }` directly, new code
+  // sends `{ badges: { url: bool }, names: { url: 'Name' } }`. Accept both
+  // so a stale renderer talking to a fresh main (or vice-versa) doesn't
+  // wipe its dots. (#5337)
+  let badges, names;
+  if (payload && typeof payload === 'object' && payload.badges && typeof payload.badges === 'object') {
+    badges = payload.badges; names = payload.names || {};
+  } else {
+    badges = payload; names = {};
+  }
   // Cache so _renderServerBar can reapply dots immediately after a re-render
   // instead of waiting for the next haven-server-badges event. (#5300)
-  this._lastServerBadges = badges;
+  this._lastServerBadges = { badges, names };
   // Main process keys serverBadgeState by normalized URL (no trailing slash,
   // no /app or /app.html, no query/hash). The DOM stores the raw user-entered
   // URL, so a direct lookup misses for any server that doesn't already happen
@@ -4332,18 +4512,57 @@ _updateServerBadgeDots(badges) {
   };
   const normalized = {};
   for (const [k, v] of Object.entries(badges)) normalized[norm(k)] = v;
+  // Track which normalized URLs are attached to a real sidebar icon. The
+  // current view's own origin never has an icon in its own sidebar (filtered
+  // out as "self"), so treat it as covered.
+  const covered = new Set();
+  try { covered.add(norm(window.location.origin)); } catch {}
   document.querySelectorAll('#server-list .server-icon.remote').forEach(el => {
     const url = el.dataset.url;
     const dot = el.querySelector('.server-unread-dot');
     if (!dot) return;
-    const count = normalized[norm(url)] || normalized[url] || badges[url] || 0;
+    const nUrl = norm(url);
+    covered.add(nUrl);
+    const count = normalized[nUrl] || normalized[url] || badges[url] || 0;
     dot.classList.toggle('active', count > 0);
   });
-  // Report the URLs we can actually surface to the user back to main.
-  // Without this, a background BrowserView for a server the user never
-  // added on this origin would light the taskbar with no visible dot
-  // anywhere — a "phantom" badge. Main filters the taskbar to URLs that
-  // at least one renderer can display. (#5269)
+  // Auto-recover for the long-standing taskbar-lit / sidebar-blank desync:
+  // when a background server fires a badge but no icon exists for it in
+  // this view's curated sidebar (per-view localStorage, alias URLs, etc),
+  // add it as a real sidebar icon using serverManager.add(). The next
+  // _renderServerBar pass will paint a proper icon (real name from the
+  // broadcast name map, real avatar fetched from /api/health, real click-
+  // to-switch behavior) and re-apply the unread dot via _lastServerBadges.
+  // (#5337)
+  let autoAdded = false;
+  this._autoAddedUnreadUrls = this._autoAddedUnreadUrls || new Set();
+  if (this.serverManager && typeof this.serverManager.add === 'function') {
+    for (const [nUrl, hasUnread] of Object.entries(normalized)) {
+      if (!hasUnread) continue;
+      if (covered.has(nUrl)) continue;
+      // Per-session guard so a server the user actively removes mid-session
+      // doesn't ping-pong back in on every badge tick.
+      if (this._autoAddedUnreadUrls.has(nUrl)) continue;
+      const name = (names && (names[nUrl] || names[nUrl + '/'])) || (() => {
+        try { return new URL(nUrl).hostname; } catch { return nUrl; }
+      })();
+      // userInitiated:true clears any stale "removed" flag — surfacing an
+      // unread badge counts as the user implicitly wanting that server back.
+      if (this.serverManager.add(name, nUrl, null, { userInitiated: true })) {
+        this._autoAddedUnreadUrls.add(nUrl);
+        autoAdded = true;
+      }
+    }
+  }
+  if (autoAdded) {
+    // _renderServerBar re-calls _updateServerBadgeDots(this._lastServerBadges)
+    // at the end of its work, so the new icon gets its dot in the next pass.
+    this._renderServerBar();
+    return;
+  }
+  // Report the URLs we can actually surface back to main so taskbar
+  // recomputation can drop phantom unreads from background-preloaded
+  // servers no view can display. (#5269)
   this._reportKnownServerUrls();
 },
 
@@ -5432,14 +5651,94 @@ _renderMediaGallery(data) {
     const el = document.getElementById(`media-count-${k}`);
     if (el) el.textContent = String((data[k] || []).length);
   });
+  // Reset selection whenever fresh data comes in so stale picks don't linger
+  this._mediaGallerySelected = new Map();
+  this._mediaGallerySelectMode = false;
+  this._refreshMediaGalleryToolbar();
   this._renderMediaGalleryTab(this._mediaGalleryActiveTab || 'photos');
+},
+
+// Build a stable key for a gallery row so the same attachment shared
+// across multiple messages is treated as distinct (since each row is its
+// own delete target). message_id + url is unique enough.
+_mediaItemKey(it) {
+  return `${it.message_id}|${it.url}`;
+},
+
+// Format bytes for the file size column / sort options. Matches the
+// human-readable formatting used elsewhere for upload size hints.
+_formatMediaSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n <= 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+},
+
+// Apply current sort to a tab's items without mutating the source array
+// (so switching sort orders doesn't permanently scramble the data).
+_sortMediaItems(items) {
+  const sort = this._mediaGallerySort || 'date-desc';
+  const arr = items.slice();
+  const cmpDate = (a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0);
+  const cmpSize = (a, b) => (a.size || 0) - (b.size || 0);
+  const cmpName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base', numeric: true });
+  switch (sort) {
+    case 'date-asc':  arr.sort(cmpDate); break;
+    case 'size-asc':  arr.sort(cmpSize); break;
+    case 'size-desc': arr.sort((a, b) => -cmpSize(a, b)); break;
+    case 'name-asc':  arr.sort(cmpName); break;
+    case 'name-desc': arr.sort((a, b) => -cmpName(a, b)); break;
+    case 'date-desc':
+    default:          arr.sort((a, b) => -cmpDate(a, b)); break;
+  }
+  return arr;
+},
+
+// Returns true if the current user can bulk-delete content in this
+// channel via the gallery (admins or anyone with delete_message; we
+// don't expose Select Mode for self-only deleters because the bulk
+// endpoint silently skips ones they can't touch — that's confusing).
+_canBulkDeleteMedia() {
+  if (!this.user) return false;
+  if (this.user.isAdmin) return true;
+  if (this._hasPerm && this._hasPerm('delete_message')) return true;
+  if (this._hasPerm && this._hasPerm('delete_lower_messages')) return true;
+  return false;
+},
+
+// Show/hide the Select + Delete bar and update the info text whenever
+// selection state changes.
+_refreshMediaGalleryToolbar() {
+  const actions = document.getElementById('media-gallery-actions');
+  const toggle  = document.getElementById('media-gallery-select-toggle');
+  const selAll  = document.getElementById('media-gallery-select-all');
+  const delBtn  = document.getElementById('media-gallery-delete');
+  const info    = document.getElementById('media-gallery-selection-info');
+  if (!actions || !toggle || !selAll || !delBtn || !info) return;
+  if (!this._canBulkDeleteMedia()) {
+    actions.style.display = 'none';
+    return;
+  }
+  actions.style.display = '';
+  const selectMode = !!this._mediaGallerySelectMode;
+  const count = this._mediaGallerySelected ? this._mediaGallerySelected.size : 0;
+  toggle.textContent = selectMode
+    ? ((window.t && t('media_gallery.cancel_select')) || 'Cancel')
+    : ((window.t && t('media_gallery.select')) || 'Select');
+  selAll.style.display = selectMode ? '' : 'none';
+  delBtn.style.display = selectMode ? '' : 'none';
+  delBtn.disabled = count === 0;
+  info.style.display = selectMode ? '' : 'none';
+  info.textContent = selectMode ? `${count} selected` : '';
 },
 
 _renderMediaGalleryTab(tab) {
   const body = document.getElementById('media-gallery-body');
   if (!body || !this._mediaGalleryData) return;
-  const items = this._mediaGalleryData[tab] || [];
-  if (items.length === 0) {
+  const rawItems = this._mediaGalleryData[tab] || [];
+  if (rawItems.length === 0) {
     const labels = {
       photos: 'No photos in this channel yet',
       videos: 'No videos in this channel yet',
@@ -5450,6 +5749,7 @@ _renderMediaGalleryTab(tab) {
     body.innerHTML = `<div class="media-gallery-empty muted-text">${labels[tab] || 'Nothing here yet'}</div>`;
     return;
   }
+  const items = this._sortMediaItems(rawItems);
 
   const fmt = (iso) => {
     try {
@@ -5460,42 +5760,69 @@ _renderMediaGalleryTab(tab) {
   };
   const esc = (s) => this._escapeHtml ? this._escapeHtml(s) : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+  // Links don't have a backing /uploads/ file we can delete from disk and
+  // sit inside whatever message they were posted in (often alongside
+  // unrelated text), so bulk-delete is intentionally disabled for them.
+  const selectMode = !!this._mediaGallerySelectMode && tab !== 'links';
+  const selected = this._mediaGallerySelected || new Map();
+  const selBox = (it) => {
+    if (!selectMode) return '';
+    const key = this._mediaItemKey(it);
+    const checked = selected.has(key) ? 'checked' : '';
+    return `<label class="media-select-box" data-msg-id="${it.message_id}" data-url="${esc(it.url)}"><input type="checkbox" ${checked}></label>`;
+  };
+  const sizeBadge = (it) => {
+    const s = this._formatMediaSize(it.size);
+    return s ? `<span class="media-size-badge">${esc(s)}</span>` : '';
+  };
+
   if (tab === 'photos') {
-    body.innerHTML = `<div class="media-gallery-grid">${items.map(it => `
-      <div class="media-grid-item" data-url="${esc(it.url)}" data-msg-id="${it.message_id}" data-action="lightbox" title="${esc(it.username || '')} • ${esc(fmt(it.created_at))}">
+    body.innerHTML = `<div class="media-gallery-grid${selectMode ? ' select-mode' : ''}">${items.map(it => `
+      <div class="media-grid-item${selected.has(this._mediaItemKey(it)) ? ' selected' : ''}" data-url="${esc(it.url)}" data-msg-id="${it.message_id}" data-action="lightbox" title="${esc(it.username || '')} • ${esc(fmt(it.created_at))}">
+        ${selBox(it)}
         <img src="${esc(it.url)}" loading="lazy" alt="">
         <button class="media-grid-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
-        <div class="media-grid-date">${esc(fmt(it.created_at))}</div>
+        <div class="media-grid-date">${esc(fmt(it.created_at))}${sizeBadge(it) ? ' • ' + sizeBadge(it) : ''}</div>
       </div>`).join('')}</div>`;
   } else if (tab === 'videos') {
-    body.innerHTML = `<div class="media-gallery-grid">${items.map(it => `
-      <div class="media-grid-item" data-url="${esc(it.url)}" data-msg-id="${it.message_id}" data-action="video-lightbox" title="${esc(it.username || '')} • ${esc(fmt(it.created_at))}">
+    body.innerHTML = `<div class="media-gallery-grid${selectMode ? ' select-mode' : ''}">${items.map(it => `
+      <div class="media-grid-item${selected.has(this._mediaItemKey(it)) ? ' selected' : ''}" data-url="${esc(it.url)}" data-msg-id="${it.message_id}" data-action="video-lightbox" title="${esc(it.username || '')} • ${esc(fmt(it.created_at))}">
+        ${selBox(it)}
         <video src="${esc(it.url)}" preload="metadata" muted></video>
         <div class="media-grid-play">▶</div>
         <button class="media-grid-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
-        <div class="media-grid-date">${esc(fmt(it.created_at))}</div>
+        <div class="media-grid-date">${esc(fmt(it.created_at))}${sizeBadge(it) ? ' • ' + sizeBadge(it) : ''}</div>
       </div>`).join('')}</div>`;
   } else if (tab === 'audios') {
-    body.innerHTML = `<div class="media-list">${items.map(it => `
-      <div class="media-list-item" data-msg-id="${it.message_id}">
+    body.innerHTML = `<div class="media-list${selectMode ? ' select-mode' : ''}">${items.map(it => `
+      <div class="media-list-item${selected.has(this._mediaItemKey(it)) ? ' selected' : ''}" data-msg-id="${it.message_id}" data-url="${esc(it.url)}">
+        ${selBox(it)}
         <div class="media-list-icon">🎵</div>
         <div class="media-list-info">
-          <span class="media-list-name">${esc(it.name || it.url.split('/').pop())}</span>
+          <span class="media-list-name">${esc(it.name || it.url.split('/').pop())} ${sizeBadge(it)}</span>
           <span class="media-list-meta">${esc(it.username || '')} • ${esc(fmt(it.created_at))}</span>
           <audio class="media-list-audio" src="${esc(it.url)}" controls preload="none"></audio>
         </div>
         <button class="media-list-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
       </div>`).join('')}</div>`;
   } else if (tab === 'files') {
-    body.innerHTML = `<div class="media-list">${items.map(it => `
-      <a class="media-list-item" href="${esc(it.url)}" download target="_blank" rel="noopener">
+    // In select mode, render as <div> instead of <a> so clicking the row
+    // toggles selection instead of triggering the download.
+    body.innerHTML = `<div class="media-list${selectMode ? ' select-mode' : ''}">${items.map(it => {
+      const isSel = selected.has(this._mediaItemKey(it));
+      const tag = selectMode ? 'div' : 'a';
+      const linkAttrs = selectMode ? '' : ` href="${esc(it.url)}" download target="_blank" rel="noopener"`;
+      return `
+      <${tag} class="media-list-item${isSel ? ' selected' : ''}" data-msg-id="${it.message_id}" data-url="${esc(it.url)}"${linkAttrs}>
+        ${selBox(it)}
         <div class="media-list-icon">📄</div>
         <div class="media-list-info">
-          <span class="media-list-name">${esc(it.name || it.url.split('/').pop())}</span>
+          <span class="media-list-name">${esc(it.name || it.url.split('/').pop())} ${sizeBadge(it)}</span>
           <span class="media-list-meta">${esc(it.username || '')} • ${esc(fmt(it.created_at))}</span>
         </div>
         <button class="media-list-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
-      </a>`).join('')}</div>`;
+      </${tag}>`;
+    }).join('')}</div>`;
   } else if (tab === 'links') {
     body.innerHTML = `<div class="media-list">${items.map(it => {
       let host = '';
@@ -5513,21 +5840,55 @@ _renderMediaGalleryTab(tab) {
     }).join('')}</div>`;
   }
 
-  // Bind clicks: lightbox for photos, jump-to-message for jump buttons / video tiles
-  body.querySelectorAll('[data-action="lightbox"]').forEach(el => {
-    el.addEventListener('click', () => {
-      const url = el.dataset.url;
-      if (url && this._openLightbox) this._openLightbox(url);
+  // Selection checkbox + row-click toggling (only active when in select
+  // mode). We let users click anywhere on the tile/row to toggle, but
+  // suppress the lightbox/download/jump actions during selection.
+  if (selectMode) {
+    body.querySelectorAll('.media-select-box').forEach(box => {
+      box.addEventListener('click', (e) => {
+        e.stopPropagation();
+      });
+      const cb = box.querySelector('input[type="checkbox"]');
+      if (cb) cb.addEventListener('change', () => {
+        const msgId = parseInt(box.dataset.msgId);
+        const url = box.dataset.url;
+        const key = `${msgId}|${url}`;
+        if (cb.checked) this._mediaGallerySelected.set(key, { message_id: msgId, url });
+        else this._mediaGallerySelected.delete(key);
+        const item = box.closest('.media-grid-item, .media-list-item');
+        if (item) item.classList.toggle('selected', cb.checked);
+        this._refreshMediaGalleryToolbar();
+      });
     });
-  });
-  body.querySelectorAll('[data-action="video-lightbox"]').forEach(el => {
-    el.addEventListener('click', (e) => {
-      // Avoid triggering when the user clicks the inner jump button
-      if (e.target.closest('[data-action="jump"]')) return;
-      const url = el.dataset.url;
-      if (url) this._openVideoLightbox(url);
+    body.querySelectorAll('.media-grid-item, .media-list-item').forEach(el => {
+      el.addEventListener('click', (e) => {
+        // Only react to bare row clicks, not clicks on the checkbox label
+        // itself (handled above) or on inner controls.
+        if (e.target.closest('.media-select-box') || e.target.closest('[data-action="jump"]') ||
+            e.target.tagName === 'AUDIO' || e.target.tagName === 'VIDEO' || e.target.tagName === 'INPUT') return;
+        const cb = el.querySelector('.media-select-box input[type="checkbox"]');
+        if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
+        e.preventDefault();
+        e.stopPropagation();
+      }, true);
     });
-  });
+  } else {
+    // Normal click behavior (lightbox, video preview, jump-to-message)
+    body.querySelectorAll('[data-action="lightbox"]').forEach(el => {
+      el.addEventListener('click', () => {
+        const url = el.dataset.url;
+        if (url && this._openLightbox) this._openLightbox(url);
+      });
+    });
+    body.querySelectorAll('[data-action="video-lightbox"]').forEach(el => {
+      el.addEventListener('click', (e) => {
+        // Avoid triggering when the user clicks the inner jump button
+        if (e.target.closest('[data-action="jump"]')) return;
+        const url = el.dataset.url;
+        if (url) this._openVideoLightbox(url);
+      });
+    });
+  }
   body.querySelectorAll('[data-action="jump"]').forEach(el => {
     el.addEventListener('click', (e) => {
       e.preventDefault();

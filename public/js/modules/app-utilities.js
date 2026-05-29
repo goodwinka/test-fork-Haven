@@ -1222,8 +1222,8 @@ _toggleEmojiPicker(anchorEl) {
   // Anchor-based positioning: used when opening from PiP or thread input buttons.
   // Move the picker to document.body so it escapes any overflow clipping context,
   // then position it with fixed coords above the anchor button. Boost z-index so
-  // it renders above the dm-pip-panel (z-index 950) and pip-mode thread-panel
-  // (z-index 10020).
+  // it renders above the dm-pip-panel (z-index 99999) and pip-mode thread-panel
+  // (z-index 99999).
   if (anchorEl) {
     if (picker.parentElement !== document.body) {
       picker._havenOrigParent = picker.parentElement;
@@ -2336,7 +2336,8 @@ _openDMPiP(code) {
       const s = onlinePartner.status;
       statusClass = s === 'dnd' ? 'dnd'
         : s === 'away' ? 'away'
-        : s === 'invisible' ? 'invisible' : '';
+        : s === 'invisible' ? 'invisible'
+        : (onlinePartner.online === false ? 'away' : '');
     } else {
       statusClass = 'away'; // partner not in online list → treat as offline/away
     }
@@ -3187,6 +3188,111 @@ _showAdminActionModal(action, userId, username) {
   document.getElementById('admin-scrub-scope').value = 'channel';
   modal.style.display = 'flex';
   modal.style.zIndex = '100002';
+},
+
+// ── Admin password reset (#5300) ───────────────────────
+// Three-stage flow: (1) confirm with explicit DM-loss warning and
+// escape-hatch explanation, (2) emit socket event to server which
+// gates on the target user having 2FA enabled, (3) reveal modal that
+// shows the temp password once for the admin to transmit out-of-band.
+_confirmAdminResetPassword(userId, username) {
+  this._closeUserGearMenu();
+  this._closeProfilePopup();
+  const safeName = this._escapeHtml(username);
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay admin-reset-pw-overlay';
+  overlay.style.display = 'flex';
+  overlay.style.zIndex = '100002';
+  overlay.innerHTML = `
+    <div class="modal admin-reset-pw-modal">
+      <div class="modal-header">
+        <h4>🔑 ${t('modals.admin_reset_pw.title') || 'Reset Password'}</h4>
+        <button class="modal-close-btn admin-reset-pw-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>${(t('modals.admin_reset_pw.confirm_prompt') || 'Generate a one-time temporary password for <b>{username}</b>?').replace('{username}', safeName)}</p>
+        <div style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.4);border-radius:8px;padding:8px 12px;margin:10px 0;font-size:0.85rem;">
+          <strong>⚠️ ${t('modals.admin_reset_pw.dm_warning_title') || 'Encrypted DM history will be lost'}</strong>
+          <p style="margin:6px 0 0 0;">${t('modals.admin_reset_pw.dm_warning_body') || "The user's E2E wrap key is derived from their password. Once they finish the forced change-password flow with a new password, their encrypted DM history becomes permanently unreadable on their side. The user can avoid this by signing in with their <em>original</em> password (which we keep on file as an escape hatch) instead of the temp one, which silently cancels this reset."}</p>
+        </div>
+        <div style="background:rgba(241,196,15,0.12);border:1px solid rgba(241,196,15,0.4);border-radius:8px;padding:8px 12px;margin:10px 0;font-size:0.85rem;">
+          <strong>🔐 ${t('modals.admin_reset_pw.mfa_required_title') || 'Two-factor authentication required'}</strong>
+          <p style="margin:6px 0 0 0;">${t('modals.admin_reset_pw.mfa_required_body') || 'The target user must have 2FA enabled before an admin can reset their password. Otherwise the temp password alone would be enough to take over the account. If they have not enabled 2FA, this will fail with a clear error.'}</p>
+        </div>
+        <p style="font-size:0.8rem;color:var(--text-muted);margin-top:8px;">${t('modals.admin_reset_pw.transmit_hint') || 'You will be shown the temp password once. Deliver it to the user out-of-band (in person, on a phone call, etc.). It is never shown again.'}</p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-sm admin-reset-pw-cancel">${t('modals.common.cancel') || 'Cancel'}</button>
+        <button class="btn-sm btn-accent btn-danger-fill admin-reset-pw-confirm">${t('modals.admin_reset_pw.confirm_btn') || 'Generate Temp Password'}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector('.admin-reset-pw-close').addEventListener('click', close);
+  overlay.querySelector('.admin-reset-pw-cancel').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('.admin-reset-pw-confirm').addEventListener('click', () => {
+    const confirmBtn = overlay.querySelector('.admin-reset-pw-confirm');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = t('modals.admin_reset_pw.working') || 'Working...';
+    this.socket.emit('admin-reset-user-password', { userId }, (resp) => {
+      close();
+      if (!resp || resp.error) {
+        const msg = resp?.code === 'mfa_required'
+          ? (t('modals.admin_reset_pw.errors.mfa_required') || resp.error)
+          : (resp?.error || t('modals.admin_reset_pw.errors.generic') || 'Failed to reset password');
+        if (this._showToast) this._showToast(msg, 'error', 8000);
+        else alert(msg);
+        return;
+      }
+      this._showAdminResetPwReveal(resp.username, resp.tempPassword);
+    });
+  });
+},
+
+_showAdminResetPwReveal(username, tempPassword) {
+  const safeName = this._escapeHtml(username);
+  const safePw = this._escapeHtml(tempPassword);
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay admin-reset-pw-reveal-overlay';
+  overlay.style.display = 'flex';
+  overlay.style.zIndex = '100003';
+  overlay.innerHTML = `
+    <div class="modal admin-reset-pw-reveal-modal">
+      <div class="modal-header">
+        <h4>🔑 ${t('modals.admin_reset_pw.reveal_title') || 'Temp Password Generated'}</h4>
+      </div>
+      <div class="modal-body">
+        <p>${(t('modals.admin_reset_pw.reveal_prompt') || 'One-time temp password for <b>{username}</b>:').replace('{username}', safeName)}</p>
+        <div style="display:flex;gap:8px;align-items:center;margin:12px 0;">
+          <code id="admin-reset-pw-value" style="flex:1;font-family:monospace;font-size:1.2rem;letter-spacing:0.05em;padding:10px 12px;background:var(--bg-secondary,#222);border:1px solid var(--border-color,#444);border-radius:6px;user-select:all;">${safePw}</code>
+          <button class="btn-sm admin-reset-pw-copy" type="button">📋 ${t('modals.common.copy') || 'Copy'}</button>
+        </div>
+        <div style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.4);border-radius:8px;padding:8px 12px;font-size:0.85rem;">
+          <strong>⚠️ ${t('modals.admin_reset_pw.reveal_warning_title') || 'Save this now'}</strong>
+          <p style="margin:6px 0 0 0;">${t('modals.admin_reset_pw.reveal_warning_body') || 'This password is never shown again. Deliver it to the user out-of-band. The user will be forced to change it on next login (or sign in with their original password to cancel the reset and keep their DM history).'}</p>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-sm btn-accent admin-reset-pw-reveal-close" type="button">${t('modals.common.done') || 'Done'}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector('.admin-reset-pw-reveal-close').addEventListener('click', close);
+  overlay.querySelector('.admin-reset-pw-copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(tempPassword);
+      const btn = overlay.querySelector('.admin-reset-pw-copy');
+      const orig = btn.textContent;
+      btn.textContent = '✓ ' + (t('modals.common.copied') || 'Copied');
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    } catch {
+      if (this._showToast) this._showToast(t('modals.common.copy_failed') || 'Copy failed', 'error');
+    }
+  });
 },
 
 _confirmTransferAdmin(userId, username) {

@@ -31,6 +31,21 @@ _setupSocketListeners() {
       }
     }
     localStorage.setItem('haven_user', JSON.stringify(this.user));
+    // (#5394) Merge server-stored nicknames. Server is authoritative for any
+    // key it knows about; localStorage keeps anything the server doesn't have yet.
+    if (data.nicknames && typeof data.nicknames === 'object') {
+      const serverNicks = data.nicknames;
+      const localNicks = this._nicknames || {};
+      // Migrate: push localStorage-only nicknames to the server once.
+      const toSync = {};
+      for (const [id, nick] of Object.entries(localNicks)) {
+        if (nick && !serverNicks[id]) toSync[id] = nick;
+      }
+      if (Object.keys(toSync).length) this.socket.emit('set-nicknames-bulk', { nicknames: toSync });
+      // Server wins on conflict.
+      this._nicknames = { ...localNicks, ...serverNicks };
+      localStorage.setItem('haven_nicknames', JSON.stringify(this._nicknames));
+    }
     // Init E2E encryption AFTER socket is fully connected & server handlers registered
     if (!this._e2eInitDone) {
       this._e2eInitDone = true;
@@ -102,6 +117,51 @@ _setupSocketListeners() {
     this.socket.emit('visibility-change', { visible: !document.hidden });
     this.socket.emit('get-channels');
     this.socket.emit('get-server-settings');
+
+    // (#5391) Watchdog: if the socket connects but channels-list never
+    // arrives, the session is in a broken state that the auth middleware
+    // didn't catch (DB hiccup mid-handshake, getEnrichedChannels throwing,
+    // user row out of sync, etc.). The visible symptom is the sidebar
+    // sitting empty forever and the user not knowing whether to refresh.
+    // After 10 s of silence, fall back to a deterministic HTTP token check
+    // and either retry once or kick to /login. Cleared as soon as
+    // channels-list lands (see the channels-list handler below).
+    if (this._channelsWatchdog) clearTimeout(this._channelsWatchdog);
+    this._channelsListGotResponse = false;
+    this._channelsWatchdog = setTimeout(async () => {
+      if (this._channelsListGotResponse) return;
+      try {
+        const resp = await fetch('/api/auth/validate', {
+          headers: { 'Authorization': 'Bearer ' + (localStorage.getItem('haven_token') || '') }
+        });
+        if (resp.status === 401 || resp.status === 404) {
+          // Token is stale or user row gone — same outcome as a socket
+          // 'Invalid token' / 'Session expired'. Kick to login.
+          localStorage.removeItem('haven_token');
+          localStorage.removeItem('haven_user');
+          localStorage.removeItem('haven_sync_key');
+          window.location.href = '/';
+          return;
+        }
+      } catch {
+        // Network failure — leave it alone, the user can refresh manually.
+        return;
+      }
+      // Token is valid but channels never came. Retry once before giving up.
+      if (!this._channelsListGotResponse && this.socket?.connected) {
+        console.warn('[#5391] channels-list missing after 10s, retrying get-channels');
+        this.socket.emit('get-channels');
+        setTimeout(() => {
+          if (!this._channelsListGotResponse) {
+            // Server clearly can't fulfil get-channels for this session —
+            // a full reload picks up any server-side fix and re-runs the
+            // auth handshake from scratch.
+            console.warn('[#5391] channels-list still missing after retry, forcing reload');
+            window.location.reload();
+          }
+        }, 5000);
+      }
+    }, 10000);
     if (this.currentChannel) {
       this.socket.emit('enter-channel', { code: this.currentChannel });
       // Reset pagination — reconnect replaces message list
@@ -177,8 +237,31 @@ _setupSocketListeners() {
   });
   document.addEventListener('visibilitychange', () => {
     this.socket?.emit('visibility-change', { visible: !document.hidden });
+    // Track when we went hidden so we can detect long sleeps on resume
+    // (PC suspend/lock for hours leaves a "zombie" socket that the client
+    // thinks is connected but the server has long since dropped via ping
+    // timeout — the result is empty member lists and no chat history on
+    // wake until you switch channels twice). (#post-sleep-channel-desync)
+    if (document.hidden) {
+      this._hiddenAt = Date.now();
+      return;
+    }
+    const hiddenForMs = this._hiddenAt ? (Date.now() - this._hiddenAt) : 0;
+    this._hiddenAt = null;
     // Mobile fix: when returning to foreground, ensure socket is connected and refresh data
     if (!document.hidden) {
+      // After a long hidden period (>30 s) the socket is almost certainly
+      // a zombie even if .connected reports true — Chromium throttles
+      // background tabs and macOS/Windows suspend network I/O during
+      // sleep. Force a clean reconnect cycle so the 'connect' handler
+      // does the full resync (enter-channel, get-messages, members,
+      // voice users, voice-rejoin) rather than relying on the partial
+      // refresh below.
+      if (hiddenForMs > 30000 && this.socket) {
+        try { this.socket.disconnect(); } catch {}
+        try { this.socket.connect(); } catch {}
+        return;
+      }
       if (this.socket && !this.socket.connected) {
         this.socket.connect();
       }
@@ -208,6 +291,12 @@ _setupSocketListeners() {
       // history before the tab switch, preserve their position by skipping the
       // reset so _renderMessages doesn't yank them to the latest messages.
       if (this.currentChannel && this.socket?.connected) {
+        // (#post-sleep-channel-desync) Re-emit enter-channel so the server
+        // re-adds this socket to its channelUsers map for this code. Without
+        // this, subsequent online-users broadcasts compute the roster from
+        // a stale map and the user sees an empty member list — exactly the
+        // symptom reported after a multi-hour PC sleep.
+        this.socket.emit('enter-channel', { code: this.currentChannel });
         if (this._coupledToBottom) {
           this._oldestMsgId = null;
           this._noMoreHistory = false;
@@ -220,6 +309,10 @@ _setupSocketListeners() {
           this.socket.emit('get-messages', { code: this.currentChannel });
         }
         this.socket.emit('get-channel-members', { code: this.currentChannel });
+        // Pull a fresh online-users + voice roster so the right-side panels
+        // aren't stuck on whatever stale snapshot was rendered before sleep.
+        this.socket.emit('request-online-users', { code: this.currentChannel });
+        this.socket.emit('request-voice-users', { code: this.currentChannel });
       }
       // Re-fetch channels in case list changed while backgrounded
       this.socket?.emit('get-channels');
@@ -250,6 +343,62 @@ _setupSocketListeners() {
     if (e.persisted && this.socket && !this.socket.connected) {
       this.socket.connect();
     }
+  });
+
+  // ── Wake-from-sleep detector (#post-sleep-channel-desync round 2) ──
+  // The visibilitychange-based fix above ONLY catches scenarios where the
+  // browser fires a hidden→visible transition. On Windows, locking the PC
+  // (Win+L) does NOT hide the window from the browser's perspective — the
+  // lock screen is an OS overlay, not a window state change. So after a
+  // multi-hour lock, visibilitychange never fires on unlock, and the
+  // previous fix never runs. Result: empty member list, empty chat,
+  // zombie socket that the client thinks is still connected.
+  //
+  // Timer drift detection works regardless of visibility: when the OS
+  // suspends or throttles JS execution, setInterval ticks pause. On wake,
+  // the next tick fires immediately with a huge gap from the previous
+  // tick. If that gap exceeds the threshold, we know the process was
+  // suspended and the socket is almost certainly a zombie.
+  this._lastWakeCheck = Date.now();
+  if (this._wakeCheckInterval) clearInterval(this._wakeCheckInterval);
+  this._wakeCheckInterval = setInterval(() => {
+    const now = Date.now();
+    const drift = now - this._lastWakeCheck;
+    this._lastWakeCheck = now;
+    // Threshold: 30 s. Normal tick is 5 s, so even with heavy GC pauses
+    // or main-thread blocking we won't false-positive at 30 s.
+    if (drift > 30000) {
+      console.log(`[wake-detect] resumed after ${Math.round(drift/1000)}s, forcing socket resync`);
+      this._forceFullResync('wake-from-sleep');
+    }
+  }, 5000);
+
+  // Window focus is another reliable wake signal on Windows: when the user
+  // unlocks the PC and clicks back into the Haven window, focus fires even
+  // if visibilitychange didn't. We debounce against the wake detector so
+  // we don't double-cycle the socket within a few seconds.
+  window.addEventListener('focus', () => {
+    const sinceLastResync = Date.now() - (this._lastForcedResync || 0);
+    if (sinceLastResync < 5000) return;
+    // Cheap liveness probe: emit a ping-check and force-resync if no pong
+    // arrives within 4 s. Avoids needlessly cycling the socket on a quick
+    // window-switch where the connection is actually fine.
+    if (!this.socket?.connected) {
+      this._forceFullResync('focus-disconnected');
+      return;
+    }
+    const probeStart = Date.now();
+    let acked = false;
+    const ackHandler = () => { acked = true; };
+    this.socket.once('pong-check', ackHandler);
+    try { this.socket.emit('ping-check'); } catch {}
+    setTimeout(() => {
+      this.socket?.off('pong-check', ackHandler);
+      if (!acked) {
+        console.log(`[wake-detect] no pong in 4s on focus (probe ${Date.now()-probeStart}ms), zombie socket — forcing resync`);
+        this._forceFullResync('focus-zombie');
+      }
+    }, 4000);
   });
 
   this.socket.on('disconnect', () => {
@@ -288,20 +437,16 @@ _setupSocketListeners() {
   this.socket.on('connect_error', (err) => {
     // Don't kick during password change — socket will reconnect with fresh token
     if (this._justChangedPassword) return;
+    // These messages come from the socket.io auth middleware and are
+    // 100% deterministic (JWT verify failure / user row mismatch / pwv bump).
+    // They are NEVER transient, so we redirect to /login on the first one
+    // instead of stranding the user on an empty channel list. (#5375)
     if (err.message === 'Invalid token' || err.message === 'Authentication required' || err.message === 'Session expired') {
-      // Require multiple consecutive auth errors before nuking the session.
-      // A single transient error during a server restart (DB not yet ready,
-      // middleware racing init) should not log the user out and wipe their
-      // dismissals/sidebar state. The token only gets cleared if the server
-      // consistently rejects it.
-      this._authErrorStreak = (this._authErrorStreak || 0) + 1;
-      if (this._authErrorStreak >= 3) {
-        localStorage.removeItem('haven_token');
-        localStorage.removeItem('haven_user');
-        localStorage.removeItem('haven_sync_key');
-        window.location.href = '/';
-        return;
-      }
+      localStorage.removeItem('haven_token');
+      localStorage.removeItem('haven_user');
+      localStorage.removeItem('haven_sync_key');
+      window.location.href = '/';
+      return;
     }
     this._setLed('connection-led', 'danger');
     this._setLed('status-server-led', 'danger');
@@ -332,6 +477,12 @@ _setupSocketListeners() {
   });
 
   this.socket.on('channels-list', (channels) => {
+    // (#5391) Cancel the channels-not-arriving watchdog
+    this._channelsListGotResponse = true;
+    if (this._channelsWatchdog) {
+      clearTimeout(this._channelsWatchdog);
+      this._channelsWatchdog = null;
+    }
     // Detect if currentChannel's code was rotated while disconnected (stale code).
     // Capture the channel's ID from the old list before overwriting it.
     let rotatedChannelId = null;
@@ -485,6 +636,16 @@ _setupSocketListeners() {
   });
 
   this.socket.on('message-history', async (data) => {
+    // (#post-sleep-channel-desync round 2) Clear the switch-channel safety
+    // timer as soon as history arrives for the channel we last switched to.
+    // This is what tells us the get-messages round-trip actually completed.
+    if (this._pendingChannelHistoryCode === data.channelCode) {
+      this._pendingChannelHistoryCode = null;
+      if (this._switchChannelSafetyTimer) {
+        clearTimeout(this._switchChannelSafetyTimer);
+        this._switchChannelSafetyTimer = null;
+      }
+    }
     // DM PiP: if this history is for the active PiP DM, render it there.
     // We render the PiP regardless of currentChannel so the loading
     // placeholder always clears even when the same DM is also the active
@@ -1000,6 +1161,18 @@ _setupSocketListeners() {
     }
   });
 
+  // #5390 — sister event of channel-deleted: messages were wiped via the
+  // auto-clear self-destruct mode but the channel itself still exists.
+  // If the user is viewing the affected channel, refetch its messages by
+  // resetting the view. Otherwise nothing visual needs to change.
+  this.socket.on('channel-messages-cleared', (data) => {
+    if (!data || !data.code) return;
+    if (this.currentChannel === data.code) {
+      try { this.switchChannel(data.code); } catch (e) { console.warn('[auto-clear] re-switch failed:', e); }
+      this._showToast('🧹 Channel messages were auto-cleared', 'info');
+    }
+  });
+
   // ── Temporary voice channel events (#163) ──────────────
   this.socket.on('temp-channel-created', (channel) => {
     if (!this.channels.find(c => c.code === channel.code)) {
@@ -1229,11 +1402,13 @@ _setupSocketListeners() {
   this.socket.on('channel-code-rotated', (data) => {
     const ch = this.channels.find(c => c.id === data.channelId);
     if (ch) {
+      const wasViewing = this.currentChannel === data.oldCode;
+      const wasInVoiceHere = !!(this.voice && this.voice.currentChannel === data.oldCode);
       ch.code = data.newCode;
       // Update display_code too (admins see real code, non-admins see masked)
       if (ch.display_code && ch.display_code !== '••••••••') ch.display_code = data.newCode;
       // Update currentChannel BEFORE re-rendering so the active highlight is correct
-      if (this.currentChannel === data.oldCode) {
+      if (wasViewing) {
         this.currentChannel = data.newCode;
       }
       // CRITICAL (#5347): if we're in voice on the rotated channel, the
@@ -1244,7 +1419,7 @@ _setupSocketListeners() {
       // updated), and we get the infinite "server says voice channel is
       // gone" loop. Migrate every voice-side code reference too.
       if (this.voice) {
-        if (this.voice.currentChannel === data.oldCode) {
+        if (wasInVoiceHere) {
           this.voice.currentChannel = data.newCode;
           console.log(`[Voice] channel code rotated mid-call: ${data.oldCode} -> ${data.newCode}`);
         }
@@ -1257,6 +1432,39 @@ _setupSocketListeners() {
       if (this.currentChannel === data.newCode) {
         const codeDisplay = document.getElementById('channel-code-display');
         if (codeDisplay) codeDisplay.textContent = ch.display_code || data.newCode;
+      }
+      // If the code changed while we were actively viewing this channel,
+      // any in-flight old-code history/presence replies are now ignored by
+      // the exact channelCode guards in the listeners below. Re-issue the
+      // active-channel fetches immediately under the new code so the chat
+      // pane and member sidebar don't sit blank until the user manually
+      // switches away and back.
+      if (wasViewing) {
+        this._oldestMsgId = null;
+        this._noMoreHistory = false;
+        this._loadingHistory = false;
+        this._historyBefore = null;
+        this._newestMsgId = null;
+        this._noMoreFuture = true;
+        this._loadingFuture = false;
+        this._historyAfter = null;
+
+        this.socket.emit('enter-channel', { code: data.newCode });
+        this.socket.emit('get-messages', { code: data.newCode });
+        this.socket.emit('get-channel-members', { code: data.newCode });
+        this.socket.emit('request-online-users', { code: data.newCode });
+        this.socket.emit('request-voice-users', { code: data.newCode });
+
+        if (this._switchChannelSafetyTimer) clearTimeout(this._switchChannelSafetyTimer);
+        this._pendingChannelHistoryCode = data.newCode;
+        this._switchChannelSafetyTimer = setTimeout(() => {
+          if (this._pendingChannelHistoryCode === data.newCode && this.currentChannel === data.newCode) {
+            console.warn(`[channel-code-rotated] no message-history for ${data.newCode} within 5s - forcing resync`);
+            this._forceFullResync?.('channel-code-rotated-timeout');
+          }
+        }, 5000);
+      } else if (wasInVoiceHere) {
+        this.socket.emit('request-voice-users', { code: data.newCode });
       }
       if (this.user.isAdmin) {
         this._showToast(t('toasts.channel_code_rotated', { name: ch.name }), 'info');
@@ -1826,6 +2034,39 @@ _setupSocketListeners() {
       }
     }, 10000);
   }
+},
+
+// ── Force a full socket resync ────────────────────────
+// Cycles the socket and lets the existing 'connect' handler do the full
+// re-fetch (enter-channel, get-messages, get-channel-members,
+// request-voice-users). Used by the wake-from-sleep detector and the
+// window-focus zombie probe. Debounced via _lastForcedResync so multiple
+// triggers within a few seconds collapse to one cycle.
+_forceFullResync(reason) {
+  const now = Date.now();
+  if (now - (this._lastForcedResync || 0) < 3000) return;
+  this._lastForcedResync = now;
+  console.log(`[force-resync] reason=${reason}, socket.connected=${!!this.socket?.connected}`);
+  if (!this.socket) return;
+  try { this.socket.disconnect(); } catch {}
+  try { this.socket.connect(); } catch {}
+  // Defensive: if for some reason 'connect' doesn't fire within 6 s,
+  // emit the resync requests anyway against the current socket so the
+  // user at least gets channel data refreshed. (The connect handler is
+  // the authoritative path — this is purely a belt-and-braces.)
+  setTimeout(() => {
+    if (this.socket?.connected && this.currentChannel) {
+      // Only do this if connect handler didn't already run very recently.
+      const sinceConnect = Date.now() - (this._lastConnectTime || 0);
+      if (sinceConnect > 5000) {
+        try { this.socket.emit('enter-channel', { code: this.currentChannel }); } catch {}
+        try { this.socket.emit('get-messages', { code: this.currentChannel }); } catch {}
+        try { this.socket.emit('get-channel-members', { code: this.currentChannel }); } catch {}
+        try { this.socket.emit('request-online-users', { code: this.currentChannel }); } catch {}
+        try { this.socket.emit('request-voice-users', { code: this.currentChannel }); } catch {}
+      }
+    }
+  }, 6000);
 },
 
 };

@@ -1748,6 +1748,47 @@ _setupDebugSection() {
       else localStorage.removeItem('debug_local_talk_indicator');
     } catch {}
   });
+
+  // #5379 — opt-in toggle to re-apply voice processing (echoCancellation /
+  // noiseSuppression / autoGainControl) to getDisplayMedia audio. Default
+  // off as of 3.17.3 because those filters hollow out music and game audio
+  // for listeners. Users sharing tutorial narration or meeting audio can
+  // flip this back on. Mic capture is a separate stream and always gets
+  // voice processing regardless of this setting.
+  const sspCb = document.getElementById('pref-debug-screen-share-voice-proc');
+  if (sspCb) {
+    try { sspCb.checked = localStorage.getItem('screen_share_voice_processing') === '1'; } catch {}
+    sspCb.addEventListener('change', () => {
+      try {
+        if (sspCb.checked) localStorage.setItem('screen_share_voice_processing', '1');
+        else localStorage.removeItem('screen_share_voice_processing');
+      } catch {}
+    });
+  }
+
+  // #5380 — always join voice muted
+  const moCb = document.getElementById('pref-voice-mute-on-join');
+  if (moCb) {
+    try { moCb.checked = localStorage.getItem('haven_mute_on_join') === '1'; } catch {}
+    moCb.addEventListener('change', () => {
+      try {
+        if (moCb.checked) localStorage.setItem('haven_mute_on_join', '1');
+        else localStorage.removeItem('haven_mute_on_join');
+      } catch {}
+    });
+  }
+
+  // #5380 — listener-only (skip mic) voice mode
+  const loCb = document.getElementById('pref-voice-listener-only');
+  if (loCb) {
+    try { loCb.checked = localStorage.getItem('haven_listener_only') === '1'; } catch {}
+    loCb.addEventListener('change', () => {
+      try {
+        if (loCb.checked) localStorage.setItem('haven_listener_only', '1');
+        else localStorage.removeItem('haven_listener_only');
+      } catch {}
+    });
+  }
 },
 
 // ── Image Display Mode Picker ──

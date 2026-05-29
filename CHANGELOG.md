@@ -11,7 +11,83 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Haven uses [Sema
 
 ---
 
-## [Unreleased]
+## [3.18.0] — 2026-05-27
+
+### Added
+- **#5394: Server-synced nicknames.** Nicknames now persist server-side so they follow you to new devices and browsers. They're still personal and private (only you see them). On first connect after this update, any nicknames already stored in your browser are pushed up automatically. The server sends your nickname list back on each login so everything stays in sync without any manual re-entry.
+- **#5389: Per-channel default role.** Channel Functions → "Default Role" picks a server role that gets auto-granted (channel-scoped) to every current member and to anyone who joins later. Setting it backfills all existing members in one transaction; clearing it leaves prior grants in place so admins can decide whether to revoke from the Roles UI. New `channels.default_role_id` column (nullable FK → roles, SET NULL on delete), new `set-channel-default-role` socket event gated on `manage_roles`, and the auto-grant fires through the public-join, server-code, and vanity-code join paths. DMs are excluded since they have no roles. `INSERT OR IGNORE` on `user_roles (user_id, role_id, channel_id)` keeps repeated joins idempotent.
+- **#5392: Admin-adjustable max sticker file size.** Stickers had a hard-coded 1 MB ceiling that made them feel cramped compared to images — small enough that most "GIF library" candidates failed to upload. Admin Settings → Uploads & Limits now has a "Max Sticker File Size (KB)" input (256–10240 KB, default 1024). The server already read `max_sticker_kb` per-upload via `createStickerUpload()`, so this just surfaces and validates the setting. Bump it up if you want stickers to double as a GIF library.
+- **#5393: `/break` slash command + persona compacting hard-stop.** Different personas sent in quick succession under the same account were sometimes still visually compacting into a single grouped block for *other* viewers (not the poster — they saw it correctly), making the personas indistinguishable. Three defensive layers now: (1) the grouping check also compares `persona_username` and the displayed `username`, so even if a stale or missing `persona_id` slips through the wire the displayed name still forces a break; (2) a new `break_chain` column on `messages` lets any message hard-stop compaction with the previous one; (3) the new `/break <message>` slash command (also surfaced in the autocomplete list) lets users manually force a fresh group whenever they want, including for normal non-persona messages. The flag round-trips through the SELECT projections, the broadcast object, and the rendered DOM data-attrs so it survives reconnects, history pagination, and DOM trimming.
+- **#5300: Admin password reset (opt-in) backend.** New `admin_password_reset_enabled` server setting (default `false`) lets admins enable a "reset user password to a one-time temp value" flow. New socket event `admin-reset-user-password` (admin-only, gated on the setting) generates a 16-hex-char temp password (`XXXX-XXXX-XXXX-XXXX`), bcrypt-hashes it, bumps `password_version` (which invalidates the target's existing JWTs via the existing pwv-rejection path), sets a new `must_change_password` flag on the user row, and returns the plaintext temp password to the admin once. Audit-logged as `admin_password_reset`. Login response now carries `mustChangePassword: bool`, and a new `POST /api/auth/change-password-required` endpoint accepts a valid token + new password and clears the flag. The setting is also mirrored into `/api/public-config` so any user can see whether admins on this server have this power before signing up. Admin Settings has a checkbox + warning text covering the E2E impact (the user's wrap key derives from the password, so old encrypted DM history becomes unrecoverable on their side, matching the existing recovery-codes flow). Backend by @Amnibro (#5318).
+- **#5390: Channel auto-clear messages timer mode.** In addition to the existing timed-delete (full channel wipe on a schedule), channels can now be set to "auto-clear" mode — messages are wiped on the interval without deleting the channel itself. New `auto_delete_mode` column on `channels` (`delete` vs `clear`); the cleanup interval branches accordingly between full channel delete and a message-only wipe (`channel-messages-cleared` broadcast refreshes the viewer). The channel badge shows hours plus a recurring glyph so it's visually distinct from one-shot expiry.
+
+### Fixed
+- **Screen-share reshare: black screen and invisible tile (#5390).** Re-sharing the screen (stop → start again without leaving the call) could leave peers with a black video tile or no tile at all. `stopScreenShare` now awaits per-peer renegotiation with `Promise.allSettled` (8 s safety cap) instead of racing against a fixed 3 s timeout. Dead-track detection in the `sameLiveTrack` guard forces a `srcObject` reassignment on reshare, and `ontrack.onended` skips tile teardown if a new screen-share is already registered, preventing a split-second where the tile disappears before the new stream attaches.
+- **Screen-share fullscreen exit: ghost tile on transient `track.onunmute` (#5391).** Exiting fullscreen on a screen-share tile and then resuming could trigger a spurious `onunmute` event that reassigned `srcObject` even when the same live track was still rendering, causing a brief freeze or blank tile. The reassignment is now skipped when the track is already attached and live.
+- **Channels-list watchdog: HTTP validate + retry + reload on silence (#5391).** In rare cases — typically after a long tab sleep or a flaky reconnect — the socket would appear connected but the server would stop sending `channels-list` updates, leaving the UI stale. The watchdog now HTTP-validates the session and retries the socket event on silence; if validation itself fails it triggers a clean page reload rather than leaving the user in a broken state indefinitely.
+- **Landing-page emojis rendering as `?` / `??` after site edits.** PowerShell 5.1's `Set-Content` without `-Encoding utf8` was rewriting `docs/index.html` and `website/index.html` as Windows-1252, silently destroying any Unicode outside that range (emojis → `?`, em-dashes → stray 0x97 bytes). Restored correct UTF-8 BOM encoding on both files and added `.editorconfig` + `.gitattributes` guardrails so the encoding survives future edits.
+
+---
+
+## [3.17.4] — 2026-05-26
+
+### Fixed
+- **iOS Web (Safari + Chrome + every other iOS browser): no audio from other people in voice channels and no audio on incoming screen shares.** WebKit's `MediaStreamAudioSourceNode` produces silence for audio tracks pulled from an `RTCPeerConnection` (long-standing WebKit bug, every iOS browser inherits it because Apple forces them all onto WebKit). Haven was routing every incoming remote audio track through Web Audio (`createMediaStreamSource → gainNode → destination`) and muting the `<audio>` element itself, which works on every other browser but means iOS users heard absolute nothing in voice — calls looked connected, peer cards lit up, but the audio was a black hole. Now iOS specifically skips the Web Audio graph and lets the `<audio>` element play the stream natively, using the element's own `volume` property for per-user / per-screen-share volume. Trade-off on iOS only: no >100% volume boost and no per-remote-peer talking analyser (the server-pushed `voice-speaking` events still drive talk indicators), in exchange for audio that actually plays. Affects `_playAudio` and `_playScreenAudio` in `voice.js`. iOS video was working already (`<video playsinline autoplay>` is set on webcam and screen-share video tiles) — the user-visible "video and audio both broken" symptom was actually audio-only, but with audio silent the call felt completely dead.
+
+### Restored
+- **Opt-in toggle: "Apply voice processing to screen-share audio" (Settings → Debug).** 3.17.3 removed echo cancellation / noise suppression / auto gain control from screen-share audio unconditionally so music and game audio would sound right, which is the correct default for almost everyone. But for the minority sharing voice content (tutorial narration, podcasts, a recorded meeting) the cleanup actually helps, and removing it outright was too aggressive. The original filter chain is back as an opt-in debug toggle (`pref-debug-screen-share-voice-proc`, localStorage key `screen_share_voice_processing`) — default off (matching 3.17.3 behavior), flip it on if you're sharing voice content. Microphone always gets full voice processing regardless.
+
+---
+
+## [3.17.3] — 2026-05-26
+
+### Fixed
+- **Mobile "Join Voice" button stayed visible after joining a voice channel (#5387).** The mobile-only floating join button was hidden via `style.display = 'none'` in JS, but `style.css` declares `.mobile-voice-join { display: flex !important; }` inside the `@media (max-width: 768px)` block. `!important` won the cascade so the button kept showing while the user was already in the call. The same race could leave it hidden after leaving in some channel-switch paths. Now uses `setProperty('display', 'none', 'important')` when hiding and `removeProperty('display')` when showing, so the inline style actually beats the stylesheet's `!important` rule and the regular media-query default is restored when in-call state ends. Applied in `app-voice.js` and three places in `app-channels.js` that toggle the same element during channel switches and welcome-screen returns.
+- **Language preference didn't always switch the UI (#5386).** Picking a new language in Settings persisted the choice to `localStorage` but only re-applied translations on elements with `data-i18n` attributes already present in the DOM. Anything rendered dynamically by JS (modals, picker entries, button labels that were templated, toasts) kept its previous-language text until the next full reload. `setLocale()` now persists the choice immediately, then triggers a single `window.location.reload()` so every dynamically-built string comes back in the new language. Defensive: `localStorage` is written *before* the locale fetch so a network blip on the locale JSON can't lose the user's selection.
+
+### Added
+- **Admin setting: Default Language (#5386).** New `default_locale` server setting (under Admin → Server Settings → Default Theme) lets admins pick the language new users see on their first visit before they've touched the language picker. Choices match the supported set (English, French, German, Spanish, Polish, Russian, Chinese) plus an "Auto-detect (browser)" default. Exposed unauthenticated via `/api/public-config` so `i18n._detect()` can consult it before falling back to the browser's `navigator.language`. Once a user picks their own language it wins from then on — the admin default only fires on first contact.
+- **Screen-share audio: full-fidelity by default for music / game audio (#5379).** Sharing screen audio used to apply the same Chromium voice processing chain (echo cancellation, noise suppression, auto gain control) as the microphone, which mangled music and game audio into a flat, low-bitrate-sounding stream. Those filters are now disabled unconditionally on the `getDisplayMedia` audio track (the previous opt-in debug toggle has been removed). The microphone is on a separate `getUserMedia` stream and still gets the voice-processing pipeline — only the system-audio capture from your screen share is full-fidelity now.
+
+### Notes
+- 3.17.3 also bundles the Haven Desktop 1.4.17 release, which addresses a screen-share encoder stall when the desktop window is hidden behind another full-size window. Desktop changelog: see `Haven-Desktop/CHANGELOG.md`.
+
+---
+
+## [3.17.2] — 2026-05-25
+
+### Fixed
+- **Right-side userlist hidden behind the message composer on tablet widths (#5384).** Between 769 and 900px the right sidebar slid in over the chat area as designed, but its `z-index: 1100` sat well below the composer's `99995`, so the bottom ~70px of the panel disappeared under the textarea and tapping that band did nothing. The mobile-overlay backdrop had the same bug. Bumped both sidebars (`.sidebar` and `.right-sidebar` on mobile breakpoints) to `100000` and the overlay to `99996` so they clear the composer while still sitting under modals (`100001`). Same fix applied to the ≤768px breakpoint.
+- **Mobile "Voice / Stage active" indicator opened the sidebar without dimming the background (#5385).** Tapping the floating voice indicator slid the right userlist in via the `mobile-right-open` class but skipped the `.mobile-overlay.active` toggle, so the page underneath stayed fully interactive and tap-outside-to-close did nothing. Now mirrors the Members-button flow and activates the overlay too.
+- **`pin_message` role permission did nothing in the message context menu.** The Pin / Unpin item was gated on `_canModerate()` (moderator level 25+) instead of the actual `pin_message` permission, so granting it to a role had no visible effect. The backend already enforced the right permission, only the client-side gating was wrong. Changed to `_hasPerm('pin_message')` so the button shows up exactly when the permission is granted.
+
+### Documented
+- **Reverse Proxy (Caddy / nginx / Traefik) section added to `GUIDE.md`.** Walks through setting `FORCE_HTTP=true` in `.env`, a minimal Caddyfile, an nginx snippet with the WebSocket `Upgrade` headers, and the tunnel + Caddy chain pattern. Common gotchas table covers the "browser still shows the self-signed cert" trap (missing `FORCE_HTTP=true`).
+
+---
+
+## [3.17.1] — 2026-05-23
+
+### Added
+- **Show/hide password toggle on every password input.** An eye button now appears inside login, register, SSO, recovery, and settings password fields so you can verify what you typed before submitting. Works on dynamically-injected forms too (transfer admin, delete account, E2E unlock, etc.).
+
+### Fixed
+- **Server fails to start with `ERR_INVALID_PACKAGE_CONFIG` on newer Node / Docker (#5374).** `package.json` in 3.17.0 contained a stray Windows-1252 em-dash byte (0x97) in the `description` field, producing invalid UTF-8. Newer Node versions (and the official Docker image) refuse to load the package and the container restart-loops. Replaced with plain ASCII so the file parses cleanly everywhere. Affects all 3.17.0 Docker deployments and self-hosted setups on Node 24+.
+- **Expired/invalid tokens now redirect to login instead of stranding users on an empty channel list (#5375).** Previously the client required three consecutive socket auth errors before clearing the token, but transport errors mixed in could prevent the counter from ever tripping. JWT verify failures and `Session expired` are 100% deterministic and never transient, so the client now redirects to `/` on the first one. If your channel list ever went empty with a "Server Error" red dot after a long absence, that's why — and a single relaunch will now bounce you straight to the login screen.
+
+---
+
+## [3.17.0] — 2026-05-23
+
+### Added
+- **Pinned messages PiP floating panel (#5370).** A pop-out button (⧉) in the pinned-panel header opens a draggable, resizable picture-in-picture overlay so you can browse and manage pins without leaving the message feed. Supports jump-to-message, unpin (with confirm), and live updates when pins change. The panel closes automatically on channel switch so stale pins never linger.
+- **Fullscreen button for pins PiP.** A maximize button in the PiP header expands the panel to fill the viewport, matching the behavior of the DM PiP.
+
+### Fixed
+- **Muted channels now block bot/webhook notifications and badge re-seeding.** Bot and webhook messages (sent with `user_id = null`) could bypass the mute check in the notification path — added a per-channel mute guard in `_fireNativeNotification` as defense-in-depth. Additionally, on reconnect or any channel-list refresh, the server's stale unread count was being re-imported for muted channels (the server has no knowledge of client-side mute state), so badges could reappear every session even for channels you'd muted. The `channels-list` handler now skips muted channels when seeding unread counts.
+- **DM status dot showing offline users as online (#5372).** The presence dot on DM entries was not correctly reflecting offline state in certain cases.
+- **PiP panel rendering below the message-input area (#5373).** Fixed z-index layering so PiP overlays always render above the composer toolbar.
+- **Pinned panel action buttons now right-aligned.** Layout fix so the unpin and close buttons sit flush to the right edge of the panel header.
 
 ---
 

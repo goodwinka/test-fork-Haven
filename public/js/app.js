@@ -4,7 +4,7 @@
 //           notifications, volume sliders, status bar
 // ═══════════════════════════════════════════════════════════
 
-import SocketMethods   from './modules/app-socket.js?v=3.16.12';
+import SocketMethods   from './modules/app-socket.js?v=3.17.1';
 import UIBindMethods   from './modules/app-ui.js?v=3.16.12';
 import MediaMethods    from './modules/app-media.js?v=3.16.12';
 import ContextMethods  from './modules/app-context.js?v=3.16.12';
@@ -75,6 +75,7 @@ class HavenApp {
       { cmd: 'spoiler',    args: '<text>',   desc: 'Hidden spoiler text' },
       { cmd: 'tts',        args: '<text>',   desc: 'Text-to-speech message' },
       { cmd: 'tts:stop',   args: '',         desc: 'Stop all TTS playback' },
+      { cmd: 'break',      args: '<message>', desc: 'Force a new message group (no compacting with previous)' },
       { cmd: 'bbs',        args: '',         desc: 'Announce you\'ll be back soon' },
       { cmd: 'brb',        args: '',         desc: 'Announce you\'ll be right back' },
       { cmd: 'afk',        args: '',         desc: 'Away from keyboard' },

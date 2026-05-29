@@ -503,10 +503,12 @@ app.post('/api/upload-webhook-avatar', uploadLimiter, (req, res) => {
   const user = token ? verifyToken(token) : null;
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
-  // Only admins can manage webhooks
+  // Admins or users with manage_webhooks permission can upload webhook avatars
   const { getDb } = require('./src/database');
   const dbUser = getDb().prepare('SELECT is_admin FROM users WHERE id = ?').get(user.id);
-  if (!dbUser || !dbUser.is_admin) return res.status(403).json({ error: 'Admin only' });
+  if (!dbUser || (!dbUser.is_admin && !userHasPermission(user.id, 'manage_webhooks'))) {
+    return res.status(403).json({ error: 'Insufficient permissions' });
+  }
 
   upload.single('avatar')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -875,21 +877,29 @@ app.get('/api/public-config', (req, res) => {
     const { getDb } = require('./src/database');
     const db = getDb();
     const themeRow = db.prepare("SELECT value FROM server_settings WHERE key = 'default_theme'").get();
+    const localeRow = db.prepare("SELECT value FROM server_settings WHERE key = 'default_locale'").get();
     const titleRow = db.prepare("SELECT value FROM server_settings WHERE key = 'server_title'").get();
     const tosRow = db.prepare("SELECT value FROM server_settings WHERE key = 'custom_tos'").get();
     const nameRow = db.prepare("SELECT value FROM server_settings WHERE key = 'server_name'").get();
     const iconRow = db.prepare("SELECT value FROM server_settings WHERE key = 'server_icon'").get();
+    const adminPwResetRow = db.prepare("SELECT value FROM server_settings WHERE key = 'admin_password_reset_enabled'").get();
     res.json({
       default_theme: themeRow?.value || '',
+      default_locale: localeRow?.value || '',
       server_title: titleRow?.value || '',
       custom_tos: tosRow?.value || '',
       // Expose name + icon so the login page can brand its tab title and
       // favicon (issue #5284). These are already public via /api/health.
       server_name: nameRow?.value || process.env.SERVER_NAME || '',
-      server_icon: iconRow?.value || ''
+      server_icon: iconRow?.value || '',
+      // Surface security-relevant settings users may want to know about
+      // before signing up (issue #5300). Allowing a user to *see* whether
+      // an admin can reset their password is the trust-and-warning half
+      // of the feature — admins enable, users get the disclosure.
+      admin_password_reset_enabled: adminPwResetRow?.value === 'true'
     });
   } catch {
-    res.json({ default_theme: '', server_title: '' });
+    res.json({ default_theme: '', default_locale: '', server_title: '' });
   }
 });
 

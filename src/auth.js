@@ -28,9 +28,18 @@ function _sessionExpiresIn() {
 }
 
 // ── TOTP helpers ─────────────────────────────────────────
-// Short-lived tokens for the TOTP verification step (not full session tokens)
-function generateTotpChallengeToken(userId) {
-  return jwt.sign({ id: userId, purpose: 'totp_challenge' }, JWT_SECRET, { expiresIn: '5m' });
+// Short-lived tokens for the TOTP verification step (not full session tokens).
+// `mustChangePassword` and `cancelTempReset` carry across the challenge so the
+// /totp/validate handler knows whether to flag the issued session for the
+// forced change-password screen (#5300) and whether to clear an outstanding
+// admin reset because the user successfully proved the original password.
+function generateTotpChallengeToken(userId, extras = {}) {
+  return jwt.sign(
+    { id: userId, purpose: 'totp_challenge',
+      mustChangePassword: !!extras.mustChangePassword,
+      cancelTempReset: !!extras.cancelTempReset },
+    JWT_SECRET, { expiresIn: '5m' }
+  );
 }
 
 function verifyTotpChallengeToken(token) {
@@ -349,7 +358,21 @@ router.post('/login', authLimiter, async (req, res) => {
     }
 
     const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) {
+    // (#5300 DM-preservation) If the original password didn't match, fall
+    // back to the temp hash set by an admin reset. Tracking which one matched
+    // controls two downstream behaviors:
+    //   - mustChangePassword (client routes to forced change-password screen)
+    //   - cancelTempReset (server clears temp_password_hash + flag on success,
+    //     silently cancelling the reset and preserving the user's E2E wrap
+    //     key since their original password is still intact)
+    let usedTemp = false;
+    const okWithOriginal = valid;
+    if (!valid && user.temp_password_hash) {
+      try {
+        usedTemp = await bcrypt.compare(password, user.temp_password_hash);
+      } catch { usedTemp = false; }
+    }
+    if (!okWithOriginal && !usedTemp) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -365,8 +388,20 @@ router.post('/login', authLimiter, async (req, res) => {
 
     // ── TOTP check: if enabled, require a second step ──
     if (user.totp_enabled) {
-      const challengeToken = generateTotpChallengeToken(user.id);
+      // Defer temp-reset state mutations until after TOTP success so an
+      // attacker holding only the original password can't clear a pending
+      // admin reset without also presenting the second factor.
+      const challengeToken = generateTotpChallengeToken(user.id, {
+        mustChangePassword: usedTemp,
+        cancelTempReset: okWithOriginal && !!user.temp_password_hash
+      });
       return res.json({ requiresTOTP: true, challengeToken });
+    }
+
+    // No TOTP gate — apply the temp-reset state mutation now.
+    if (okWithOriginal && user.temp_password_hash) {
+      db.prepare('UPDATE users SET temp_password_hash = NULL, must_change_password = 0 WHERE id = ?').run(user.id);
+      user.must_change_password = 0;
     }
 
     const token = jwt.sign(
@@ -386,10 +421,76 @@ router.post('/login', authLimiter, async (req, res) => {
 
     res.json({
       token,
-      user: { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName }
+      user: { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName },
+      // (#5300) Set when an admin reset this user's password to a temp
+      // placeholder AND the user just logged in with that temp pw. Client
+      // must funnel the user through a mandatory change-password screen
+      // before doing anything else. False when the user logged in with
+      // their original password (which silently cancels the reset).
+      mustChangePassword: usedTemp
     });
   } catch (err) {
     console.error('Login error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Forced change-password endpoint (#5300) ─────────────────
+// Used after an admin password reset. Requires a valid session token,
+// validates the new password's length, updates the row, clears the
+// must_change_password flag, and returns a fresh JWT so the client
+// doesn't have to re-login.
+router.post('/change-password-required', authLimiter, async (req, res) => {
+  try {
+    const auth = req.headers.authorization || '';
+    if (!auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
+    let decoded;
+    try { decoded = jwt.verify(auth.slice(7), JWT_SECRET); } catch { return res.status(401).json({ error: 'Unauthorized' }); }
+    const newPassword = typeof req.body.newPassword === 'string' ? req.body.newPassword : '';
+    // (#5300 DM-preservation) Optional escape hatch from the forced
+    // change-password screen: if the user remembers their original password
+    // and submits it here, we cancel the admin reset without changing the
+    // password at all. password_hash is left intact, so the user's E2E
+    // wrap key (PBKDF2-derived from the password) keeps working and DM
+    // history is preserved. The newPassword field is ignored in this path.
+    const oldPassword = typeof req.body.oldPassword === 'string' ? req.body.oldPassword : '';
+    const db = getDb();
+    const user = db.prepare('SELECT id, username, is_admin, display_name, password_version, password_hash FROM users WHERE id = ?').get(decoded.id);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    let preserved = false;
+    if (oldPassword) {
+      let matchesOriginal = false;
+      try { matchesOriginal = await bcrypt.compare(oldPassword, user.password_hash); } catch { /* fall through */ }
+      if (matchesOriginal) {
+        preserved = true;
+      } else {
+        return res.status(401).json({ error: 'Old password did not match', code: 'old_password_invalid' });
+      }
+    }
+
+    if (!preserved && (newPassword.length < 8 || newPassword.length > 128)) {
+      return res.status(400).json({ error: 'Password must be 8 to 128 characters' });
+    }
+
+    const newPwv = (user.password_version || 1) + 1;
+    if (preserved) {
+      db.prepare('UPDATE users SET temp_password_hash = NULL, password_version = ?, must_change_password = 0 WHERE id = ?')
+        .run(newPwv, user.id);
+    } else {
+      const hash = await bcrypt.hash(newPassword, 10);
+      db.prepare('UPDATE users SET password_hash = ?, temp_password_hash = NULL, password_version = ?, must_change_password = 0 WHERE id = ?')
+        .run(hash, newPwv, user.id);
+    }
+    const displayName = user.display_name || user.username;
+    const freshToken = jwt.sign(
+      { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName, pwv: newPwv },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    res.json({ token: freshToken, user: { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName }, preserved });
+  } catch (err) {
+    console.error('change-password-required error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -471,6 +572,15 @@ router.post('/totp/validate', authLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid code' });
     }
 
+    // (#5300) Apply any deferred temp-reset state mutations now that TOTP
+    // succeeded. If the user logged in with their original password,
+    // silently clear the admin reset (DM history preserved). If they used
+    // the temp password, the must_change_password flag stays set so the
+    // client routes them to the forced change-password screen.
+    if (challenge.cancelTempReset) {
+      db.prepare('UPDATE users SET temp_password_hash = NULL, must_change_password = 0 WHERE id = ?').run(user.id);
+    }
+
     const displayName = user.display_name || user.username;
     const token = jwt.sign(
       { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName, pwv: user.password_version || 1 },
@@ -480,7 +590,8 @@ router.post('/totp/validate', authLimiter, async (req, res) => {
 
     res.json({
       token,
-      user: { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName }
+      user: { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName },
+      mustChangePassword: !!challenge.mustChangePassword
     });
   } catch (err) {
     console.error('TOTP validate error:', err);

@@ -63,6 +63,7 @@ async _joinVoice() {
 
     this.notifications.playDirect('voice_join');
     this._updateVoiceButtons(true);
+    this._syncMuteDeafenButtons();
     this._updateVoiceStatus(true);
     this._updateVoiceBar();
     // Server's broadcastVoiceUsers (fired on our voice-join) prunes stale
@@ -233,8 +234,14 @@ _updateVoiceButtons(inVoice) {
   if (sidebarDeafen) sidebarDeafen.style.display = (inVoice && useSidebar) ? '' : 'none';
 
   // Mobile voice join in right sidebar
+  // NOTE: must use setProperty('display', ..., 'important') because the mobile CSS
+  // rule .mobile-voice-join { display: flex !important; } would otherwise win and
+  // keep the button visible while already in voice (#5387).
   const mobileJoin = document.getElementById('voice-join-mobile');
-  if (mobileJoin) mobileJoin.style.display = inVoice ? 'none' : '';
+  if (mobileJoin) {
+    if (inVoice) mobileJoin.style.setProperty('display', 'none', 'important');
+    else mobileJoin.style.removeProperty('display');
+  }
 
   if (!inVoice) {
     // Reset all mute/deafen buttons (sidebar + header)
@@ -981,11 +988,35 @@ _handleScreenStream(userId, stream, { force = false } = {}) {
     const videoEl = tile.querySelector('video');
     // Force a layout reflow so the video element has real dimensions
     void videoEl.offsetHeight;
-    // Force re-render if the same stream is re-assigned (otherwise it's a no-op → black screen)
-    if (videoEl.srcObject === stream) {
-      videoEl.srcObject = null;
+    // Skip srcObject reassignment if the existing stream already wraps the
+    // same live video track AND we're already getting frames. WebRTC fires
+    // track.onunmute on every transient packet-loss / bitrate-adapt blip;
+    // each fire calls back into here with `new MediaStream([sameTrack])`.
+    // Reassigning srcObject in those moments kicks the browser out of
+    // fullscreen (and pop-out, on some platforms) because the fullscreen
+    // element's underlying media briefly "changes". Only swap if the track
+    // is actually different or we don't have frames yet.
+    const newVideoTrack = stream.getVideoTracks()[0] || null;
+    const curStream = videoEl.srcObject;
+    const curVideoTrack = curStream ? (curStream.getVideoTracks?.()[0] || null) : null;
+    // If the currently attached track is dead (readyState !== 'live'), we MUST
+    // reassign — even if the new track has the same id, the browser will keep
+    // rendering a black frame from the dead source. This happens on reshare
+    // when the sharer's stopScreenShare ends the track but the viewer's
+    // element still holds a reference to that dead MediaStreamTrack.
+    const curTrackIsDead = !!curVideoTrack && curVideoTrack.readyState !== 'live';
+    const sameLiveTrack = !curTrackIsDead &&
+      newVideoTrack && curVideoTrack &&
+      newVideoTrack.id === curVideoTrack.id &&
+      newVideoTrack.readyState === 'live' &&
+      videoEl.videoWidth > 0;
+    if (!sameLiveTrack) {
+      // Force re-render if the same stream is re-assigned (otherwise it's a no-op → black screen)
+      if (videoEl.srcObject === stream) {
+        videoEl.srcObject = null;
+      }
+      videoEl.srcObject = stream;
     }
-    videoEl.srcObject = stream;
     videoEl.play().catch(() => {});
     // Also re-play when metadata loads (handles late-arriving tracks)
     videoEl.onloadedmetadata = () => { videoEl.play().catch(() => {}); };

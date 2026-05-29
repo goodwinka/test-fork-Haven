@@ -153,10 +153,15 @@
   const registerForm = document.getElementById('register-form');
   const ssoForm = document.getElementById('sso-form');
   const totpForm = document.getElementById('totp-form');
+  const forcedChangeForm = document.getElementById('forced-change-form');
   const errorEl = document.getElementById('auth-error');
 
   // Pending TOTP challenge state (set after successful password auth)
   let _pendingChallenge = null; // { challengeToken, password }
+  // Pending forced password change after admin reset (#5300).
+  // Holds the temp-pw session token + the password the user typed (which
+  // was the temp password). Cleared once the change-password flow completes.
+  let _pendingForcedChange = null; // { token, user, originalPassword }
 
   function showTotpForm() {
     loginForm.style.display = 'none';
@@ -174,6 +179,21 @@
     loginForm.style.display = 'flex';
     document.querySelector('.auth-tabs').style.display = 'flex';
     _pendingChallenge = null;
+    hideError();
+  }
+
+  function showForcedChangeForm() {
+    loginForm.style.display = 'none';
+    registerForm.style.display = 'none';
+    if (ssoForm) ssoForm.style.display = 'none';
+    totpForm.style.display = 'none';
+    forcedChangeForm.style.display = 'flex';
+    document.querySelector('.auth-tabs').style.display = 'none';
+    document.getElementById('forced-new-password').value = '';
+    document.getElementById('forced-confirm-password').value = '';
+    document.getElementById('forced-old-password').value = '';
+    document.getElementById('forced-change-recall').open = false;
+    document.getElementById('forced-new-password').focus();
     hideError();
   }
 
@@ -320,6 +340,13 @@
         return;
       }
 
+      // ── Forced change-password after admin reset (#5300) ──
+      if (data.mustChangePassword) {
+        _pendingForcedChange = { token: data.token, user: data.user, originalPassword: password };
+        showForcedChangeForm();
+        return;
+      }
+
       // Derive E2E wrapping key from password (client-side only, never sent to server)
       const e2eWrap = await deriveE2EWrappingKey(password);
       sessionStorage.setItem('haven_e2e_wrap', e2eWrap);
@@ -351,6 +378,14 @@
 
       const data = await res.json();
       if (!res.ok) return showError(data.error || t('auth.errors.verification_failed'));
+
+      // ── Forced change-password after admin reset (#5300) ──
+      if (data.mustChangePassword) {
+        _pendingForcedChange = { token: data.token, user: data.user, originalPassword: _pendingChallenge.password };
+        _pendingChallenge = null;
+        showForcedChangeForm();
+        return;
+      }
 
       // Derive E2E wrapping key from the original password
       const e2eWrap = await deriveE2EWrappingKey(_pendingChallenge.password);
@@ -400,6 +435,65 @@
       hideTotpForm();
     });
   }
+
+  // ── Forced change-password after admin reset (#5300) ──
+  // Two paths:
+  //   • User remembers their original password, enters it in the recall
+  //     section. Server clears the admin reset and the user signs in with
+  //     their original password. We derive the E2E wrap key from THAT
+  //     original password so existing DM history stays decryptable.
+  //   • User just picks a new password. Server rotates password_hash.
+  //     We derive a fresh E2E wrap key from the new password. Existing
+  //     DM history is permanently unreadable on the client (warned about
+  //     in the form copy).
+  forcedChangeForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hideError();
+    if (!_pendingForcedChange) return showError(t('auth.errors.session_expired'));
+
+    const newPw = document.getElementById('forced-new-password').value;
+    const confirmPw = document.getElementById('forced-confirm-password').value;
+    const oldPw = document.getElementById('forced-old-password').value;
+    const useRecall = !!oldPw;
+
+    if (!useRecall) {
+      if (!newPw || newPw.length < 8) return showError(t('auth.forced_change.errors.too_short') || 'New password must be at least 8 characters');
+      if (newPw !== confirmPw) return showError(t('auth.forced_change.errors.mismatch') || 'New passwords do not match');
+    }
+
+    try {
+      const body = useRecall ? { oldPassword: oldPw }
+                             : { newPassword: newPw };
+      const res = await fetch('/api/auth/change-password-required', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${_pendingForcedChange.token}` },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data.code === 'old_password_invalid') {
+          return showError(t('auth.forced_change.errors.old_invalid') || 'Original password did not match');
+        }
+        return showError(data.error || t('auth.errors.connection_error'));
+      }
+
+      // Derive wrap key from whichever password the account is now using.
+      // preserved=true means password_hash was untouched, so the original
+      // password remains the wrap key source. preserved=false means the
+      // new password is now the wrap key source (DMs unrecoverable).
+      const wrapSource = data.preserved ? oldPw : newPw;
+      const e2eWrap = await deriveE2EWrappingKey(wrapSource);
+      sessionStorage.setItem('haven_e2e_wrap', e2eWrap);
+
+      localStorage.setItem('haven_token', data.token);
+      localStorage.setItem('haven_user', JSON.stringify(data.user));
+      localStorage.setItem('haven_eula_accepted', '2.0');
+      _pendingForcedChange = null;
+      window.location.href = _appUrl;
+    } catch (err) {
+      showError(t('auth.errors.connection_error'));
+    }
+  });
 
   // ── SSO (Link Server) ──────────────────────────────────
   if (ssoForm) {

@@ -162,6 +162,33 @@ function initDatabase() {
     db.exec("CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id)");
   } catch { /* already exists */ }
 
+  // ── Migration: must_change_password flag on users (#5300) ──
+  // Set to 1 by admin password-reset; cleared the first time the user
+  // sets a new password through the forced-change flow. Login still
+  // succeeds when the flag is set — the client routes the user to a
+  // mandatory change-password screen before the rest of the app loads.
+  try {
+    db.prepare("SELECT must_change_password FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0");
+  }
+
+  // ── Migration: temp_password_hash for admin-reset DM preservation (#5300) ──
+  // When an admin resets a user's password we now write the temp password's
+  // bcrypt hash to this column instead of overwriting `password_hash`. Login
+  // accepts EITHER hash. This gives the user an escape hatch: if they still
+  // remember their original password they can log in with it and the temp
+  // hash is silently cleared, cancelling the reset and preserving their
+  // E2E DM wrap key (which is PBKDF2-derived from the password). Only if
+  // the user logs in with the temp pw does the forced change-password
+  // flow rotate `password_hash`, which is when DM history becomes
+  // unrecoverable on their side.
+  try {
+    db.prepare("SELECT temp_password_hash FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN temp_password_hash TEXT DEFAULT NULL");
+  }
+
   // ── Migration: edited_at column on messages ───────────
   try {
     db.prepare("SELECT edited_at FROM messages LIMIT 0").get();
@@ -181,6 +208,17 @@ function initDatabase() {
     db.exec("ALTER TABLE messages ADD COLUMN burning_started_at DATETIME DEFAULT NULL");
   }
 
+  // ── Migration: break_chain flag on messages (#5393) ────
+  // 1 = this message must not visually compact with the previous one
+  // (used by the `/break` slash command and reinforced for persona
+  // messages so different personas under the same account never merge
+  // into a single grouped block).
+  try {
+    db.prepare("SELECT break_chain FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN break_chain INTEGER DEFAULT 0");
+  }
+
   // ── Migration: high_scores table ────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS high_scores (
@@ -189,6 +227,18 @@ function initDatabase() {
       score INTEGER NOT NULL DEFAULT 0,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (user_id, game)
+    );
+  `);
+
+  // ── Migration: user_nicknames table (#5394) ──────────────
+  // Personal, private nicknames — only visible to the user who set them.
+  // owner_id = the user who assigned the nickname; target_id = the user being renamed.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_nicknames (
+      owner_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      target_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      nickname  TEXT NOT NULL,
+      PRIMARY KEY (owner_id, target_id)
     );
   `);
 
@@ -223,10 +273,12 @@ function initDatabase() {
   insertSetting.run('max_message_chars', '2000');         // max characters per message (200–100000)
   insertSetting.run('max_sound_kb', '1024');              // max soundboard file size in KB (256–10240)
   insertSetting.run('max_emoji_kb', '256');               // max emoji file size in KB (64–1024)
+  insertSetting.run('max_sticker_kb', '1024');            // max sticker file size in KB (256–10240) — #5392
   insertSetting.run('setup_wizard_complete', 'false');   // first-time admin setup wizard
   insertSetting.run('update_banner_admin_only', 'false'); // hide update banner from non-admins
   insertSetting.run('session_duration_days', '7');       // login token lifetime (1–365); admins can extend per #5294
   insertSetting.run('published_themes', '[]');             // JSON array of *.theme.css filenames shown in the theme picker
+  insertSetting.run('admin_password_reset_enabled', 'false'); // admin can reset user passwords (#5300), opt-in, defaults off
 
   // Unique server fingerprint — used by the multi-server sidebar to detect "self"
   const crypto = require('crypto');
@@ -370,6 +422,15 @@ function initDatabase() {
   ];
   for (const col of codeSettingsCols) {
     try { db.prepare(`SELECT ${col.name} FROM channels LIMIT 0`).get(); } catch { db.exec(col.sql); }
+  }
+
+  // ── Migration: per-channel default role (#5389) ──────────
+  // When set, every existing and future member of this channel is granted
+  // this role scoped to this channel via user_roles. NULL = no auto-grant.
+  try {
+    db.prepare("SELECT default_role_id FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN default_role_id INTEGER DEFAULT NULL REFERENCES roles(id) ON DELETE SET NULL");
   }
 
   // ── Migration: sub-channels (parent_channel_id, position) ──
@@ -637,6 +698,14 @@ function initDatabase() {
     { name: 'notification_type',  sql: "ALTER TABLE channels ADD COLUMN notification_type TEXT DEFAULT 'default'" },
     { name: 'voice_enabled',     sql: "ALTER TABLE channels ADD COLUMN voice_enabled INTEGER DEFAULT 1" },
     { name: 'text_enabled',      sql: "ALTER TABLE channels ADD COLUMN text_enabled INTEGER DEFAULT 1" },
+    // #5390 — extend the self-destruct timer with a "clear messages only"
+    // mode. `auto_delete_mode` is 'delete' (existing behaviour: drop the
+    // whole channel) or 'clear' (wipe messages but keep channel, perms,
+    // roles, integrations). `auto_delete_interval_hours` stores the
+    // original interval so a 'clear' timer can rearm itself after firing
+    // (recurring sweep) instead of being a one-shot.
+    { name: 'auto_delete_mode',           sql: "ALTER TABLE channels ADD COLUMN auto_delete_mode TEXT DEFAULT 'delete'" },
+    { name: 'auto_delete_interval_hours', sql: "ALTER TABLE channels ADD COLUMN auto_delete_interval_hours INTEGER DEFAULT NULL" },
   ];
   for (const col of channelQolCols) {
     try { db.prepare(`SELECT ${col.name} FROM channels LIMIT 0`).get(); } catch { db.exec(col.sql); }

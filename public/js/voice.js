@@ -2,6 +2,23 @@
 // Haven — WebRTC Voice Chat Manager
 // ═══════════════════════════════════════════════════════════
 
+// iOS Safari (and every "browser" on iOS, since they all wrap WebKit) has a
+// long-standing bug where MediaStreamAudioSourceNode produces silence for
+// audio tracks received from an RTCPeerConnection. The track is alive and
+// audible if attached directly to an <audio> element, but routing it
+// through createMediaStreamSource() → ... → destination gives you nothing.
+// Detect iOS so _playAudio / _playScreenAudio can skip the Web Audio graph
+// and use native element playback instead. (#5388-ish, iOS Web fix)
+const _IS_IOS_WEBKIT = (() => {
+  try {
+    const ua = navigator.userAgent || '';
+    const isIOS = /iPad|iPhone|iPod/.test(ua) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    // Treat all iOS browsers as WebKit (they are, by App Store policy).
+    return isIOS;
+  } catch { return false; }
+})();
+
 class VoiceManager {
   constructor(socket) {
     this.socket = socket;
@@ -188,6 +205,11 @@ class VoiceManager {
 
       try {
         const conn = peer.connection;
+        // An incoming offer supersedes any local offer we were preparing or
+        // waiting to have answered. Clear those flags so the post-answer drain
+        // can safely issue one fresh follow-up offer if local changes are still pending.
+        peer._makingOffer = false;
+        peer._awaitingAnswer = false;
         // Handle renegotiation glare: if we have a pending local offer,
         // roll it back first so we can accept the incoming one.
         if (conn.signalingState !== 'stable') {
@@ -216,6 +238,12 @@ class VoiceManager {
         }
       } catch (err) {
         console.error('Error handling voice offer:', err);
+      } finally {
+        const latestPeer = this.peers.get(from.id);
+        if (latestPeer && latestPeer.connection === peer?.connection && latestPeer.connection.signalingState === 'stable') {
+          latestPeer._awaitingAnswer = false;
+          this._drainQueuedRenegotiation(from.id);
+        }
       }
     });
 
@@ -228,6 +256,7 @@ class VoiceManager {
           // (we may have rolled back our offer due to glare)
           if (peer.connection.signalingState === 'have-local-offer') {
             await peer.connection.setRemoteDescription(new RTCSessionDescription(data.answer));
+            peer._awaitingAnswer = false;
             // Flush buffered ICE candidates that arrived before the answer
             if (peer._pendingCandidates && peer._pendingCandidates.length) {
               for (const c of peer._pendingCandidates) {
@@ -235,9 +264,19 @@ class VoiceManager {
               }
               peer._pendingCandidates = [];
             }
+          } else if (peer._awaitingAnswer && peer.connection.signalingState === 'stable') {
+            // Stale answer for a local offer we already rolled back after glare.
+            peer._awaitingAnswer = false;
           }
         } catch (err) {
           console.error('Error handling voice answer:', err);
+          if (peer._awaitingAnswer && peer.connection.signalingState === 'stable') {
+            peer._awaitingAnswer = false;
+          }
+        } finally {
+          if (peer.connection.signalingState === 'stable') {
+            this._drainQueuedRenegotiation(data.from.id);
+          }
         }
       }
     });
@@ -468,6 +507,11 @@ class VoiceManager {
       const preservedMuteState = this.isMuted;
       const preservedDeafenState = this.isDeafened;
 
+      // #5380 — "Always join muted" user preference. If set, force mute on
+      // every join so users who like to lurk-first never accidentally hot-mic.
+      let muteOnJoin = false;
+      try { muteOnJoin = localStorage.getItem('haven_mute_on_join') === '1'; } catch {}
+
       // Don't attempt to join while the socket is disconnected. The
       // emit() would otherwise be buffered by socket.io and flushed on
       // reconnect, producing duplicate sessions if the user clicked
@@ -498,24 +542,39 @@ class VoiceManager {
       };
       if (savedInputId) audioConstraints.deviceId = { exact: savedInputId };
 
-      try {
-        this.rawStream = await navigator.mediaDevices.getUserMedia({
-          audio: audioConstraints,
-          video: false
-        });
-      } catch (deviceErr) {
-        if (savedInputId) {
-          // Saved device may be stale — retry with default mic
-          console.warn('Saved mic device failed, falling back to default:', deviceErr.message);
-          localStorage.removeItem('haven_input_device');
-          delete audioConstraints.deviceId;
+      // #5380 — listener-only mode flag; set if mic acquisition fails or
+      // the user has explicitly opted out via "Join without microphone".
+      this.isListenerOnly = false;
+      const lurkPref = (() => { try { return localStorage.getItem('haven_listener_only') === '1'; } catch { return false; } })();
+
+      if (!lurkPref) {
+        try {
           this.rawStream = await navigator.mediaDevices.getUserMedia({
             audio: audioConstraints,
             video: false
           });
-        } else {
-          throw deviceErr;
+        } catch (deviceErr) {
+          if (savedInputId) {
+            // Saved device may be stale — retry with default mic
+            console.warn('Saved mic device failed, falling back to default:', deviceErr.message);
+            localStorage.removeItem('haven_input_device');
+            delete audioConstraints.deviceId;
+            try {
+              this.rawStream = await navigator.mediaDevices.getUserMedia({
+                audio: audioConstraints,
+                video: false
+              });
+            } catch (retryErr) {
+              console.warn('[Voice] No mic available, falling back to listener-only mode:', retryErr.message);
+              this.isListenerOnly = true;
+            }
+          } else {
+            console.warn('[Voice] No mic available, falling back to listener-only mode:', deviceErr.message);
+            this.isListenerOnly = true;
+          }
         }
+      } else {
+        this.isListenerOnly = true;
       }
 
       // Opt out of Windows audio ducking (Desktop app only).
@@ -524,58 +583,80 @@ class VoiceManager {
         setTimeout(() => window.havenDesktop.audio.optOutOfDucking().catch(() => {}), 500);
       }
 
-      // ── Noise Gate via Web Audio ──
-      // Route mic through an analyser + gain node so we can silence
-      // audio below a threshold before sending it to peers.
-      const source = this.audioCtx.createMediaStreamSource(this.rawStream);
-      this._rnnoiseSource = source;
-      const gateAnalyser = this.audioCtx.createAnalyser();
-      gateAnalyser.fftSize = 2048;
-      gateAnalyser.smoothingTimeConstant = 0.3;
-      source.connect(gateAnalyser);
+      if (this.isListenerOnly) {
+        // #5380 — Listener-only path: skip mic, noise gate, RNNoise, talk
+        // detection. We still publish a silent placeholder track to peer
+        // connections so the existing offer/answer flow doesn't need any
+        // changes. The track is force-disabled (muted) so peers receive
+        // pure silence. UI shows the user as muted with a "Listener" badge.
+        const silentDest = this.audioCtx.createMediaStreamDestination();
+        // No source connected → MediaStreamDestination produces silence.
+        this._vcDest = silentDest;
+        this.localStream = silentDest.stream;
+        this._rnnoiseSource = null;
+        this._noiseGateAnalyser = null;
+        this._noiseGateGain = null;
+      } else {
+        // ── Noise Gate via Web Audio ──
+        // Route mic through an analyser + gain node so we can silence
+        // audio below a threshold before sending it to peers.
+        const source = this.audioCtx.createMediaStreamSource(this.rawStream);
+        this._rnnoiseSource = source;
+        const gateAnalyser = this.audioCtx.createAnalyser();
+        gateAnalyser.fftSize = 2048;
+        gateAnalyser.smoothingTimeConstant = 0.3;
+        source.connect(gateAnalyser);
 
-      const gateGain = this.audioCtx.createGain();
-      source.connect(gateGain);
+        const gateGain = this.audioCtx.createGain();
+        source.connect(gateGain);
 
-      const dest = this.audioCtx.createMediaStreamDestination();
-      gateGain.connect(dest);
+        const dest = this.audioCtx.createMediaStreamDestination();
+        gateGain.connect(dest);
 
-      this._noiseGateAnalyser = gateAnalyser;
-      this._noiseGateGain = gateGain;
-      this._vcDest = dest;
-      this.localStream = dest.stream;   // processed stream → peers
-      this._startNoiseGate();
+        this._noiseGateAnalyser = gateAnalyser;
+        this._noiseGateGain = gateGain;
+        this._vcDest = dest;
+        this.localStream = dest.stream;   // processed stream → peers
+        this._startNoiseGate();
 
-      // Initialize RNNoise and apply saved noise mode
-      await this._initRNNoise();
-      if (this.noiseMode === 'suppress' && this._rnnoiseReady) {
-        this.setNoiseSensitivity(0);
-        this._enableRNNoise();
-      } else if (this.noiseMode === 'off') {
-        this.setNoiseSensitivity(0);
-      } else if (this.noiseMode === 'gate') {
-        const saved = parseInt(localStorage.getItem('haven_ns_value') || '10', 10);
-        this.setNoiseSensitivity(saved);
+        // Initialize RNNoise and apply saved noise mode
+        await this._initRNNoise();
+        if (this.noiseMode === 'suppress' && this._rnnoiseReady) {
+          this.setNoiseSensitivity(0);
+          this._enableRNNoise();
+        } else if (this.noiseMode === 'off') {
+          this.setNoiseSensitivity(0);
+        } else if (this.noiseMode === 'gate') {
+          const saved = parseInt(localStorage.getItem('haven_ns_value') || '10', 10);
+          this.setNoiseSensitivity(saved);
+        }
       }
 
       this.currentChannel = channelCode;
       this.inVoice = true;
-      this.isMuted = preservedMuteState;
+      // Listener-only is always muted (no audio to send). mute-on-join also forces mute.
+      this.isMuted = this.isListenerOnly || muteOnJoin || preservedMuteState;
       this.isDeafened = preservedDeafenState;
 
       this._applyMuteStateToLocalTracks();
-      
+
       // Persist voice channel for auto-rejoin after page refresh or server restart
       try { localStorage.setItem('haven_voice_channel', channelCode); } catch {}
 
       this.socket.emit('voice-join', { code: channelCode });
+      // Inform peers / UI about our mute state so they show the muted icon
+      // immediately instead of waiting for someone to query.
+      if (this.isMuted) {
+        try { this.socket.emit('voice-mute-state', { code: channelCode, muted: true }); } catch {}
+      }
 
-      // Start local talk indicator (use raw stream for accurate detection)
-      this._startLocalTalkDetection();
+      // Start local talk indicator (use raw stream for accurate detection).
+      // Skip in listener-only mode — there's no mic to detect.
+      if (!this.isListenerOnly) this._startLocalTalkDetection();
 
       return true;
     } catch (err) {
-      console.error('Microphone access failed:', err);
+      console.error('Voice join failed:', err);
       return false;
     }
   }
@@ -762,6 +843,8 @@ class VoiceManager {
   }
 
   toggleMute() {
+    // #5380 — listener-only mode has no mic; force-stay muted.
+    if (this.isListenerOnly) { this.isMuted = true; return true; }
     this.isMuted = !this.isMuted;
     this._applyMuteStateToLocalTracks();
     return this.isMuted;
@@ -828,6 +911,21 @@ class VoiceManager {
         video: videoConstraints,
         audio: true,
       };
+
+      // #5379 — Default to raw screen audio. Chromium normally applies
+      // echoCancellation / noiseSuppression / autoGainControl to
+      // getDisplayMedia audio (tuned for voice), which hollows out music
+      // and game audio for listeners. Power users sharing a tutorial or
+      // talk where they want the captured system audio to be cleaned up
+      // can opt back in via Settings → Debug → "Apply voice processing
+      // to screen-share audio". Mic capture (getUserMedia) is a separate
+      // stream and always gets full voice processing regardless.
+      const applyVoiceProcToScreen = (() => {
+        try { return localStorage.getItem('screen_share_voice_processing') === '1'; } catch { return false; }
+      })();
+      displayMediaOptions.audio = applyVoiceProcToScreen
+        ? true
+        : { echoCancellation: false, autoGainControl: false, noiseSuppression: false };
 
       // These options aren't supported in Electron's Chromium — only add them
       // when running in a regular browser to avoid immediate rejection.
@@ -911,11 +1009,20 @@ class VoiceManager {
       renegotiations.push(this._renegotiate(userId, peer.connection).catch(() => {}));
     }
 
-    // Wait for all renegotiations to complete (with a timeout so we don't hang forever)
+    // Wait for ALL renegotiations to actually finish before tearing the
+    // tracks down. The previous Promise.race(..., 3s) here was the cause of
+    // the months-long "black screen on reshare" / "streaming but no tile"
+    // bugs: if any peer's _renegotiate was still in flight when the 3s
+    // expired (perfectly possible since _renegotiate itself can wait up to
+    // 5s for signaling state to settle), this function would return, kill
+    // the tracks, and leave that peer's transceiver mid-direction-change.
+    // On the next startScreenShare the new addTrack would reuse that broken
+    // transceiver and ontrack would never fire on the viewer side — exactly
+    // the symptom users reported. Use allSettled with a generous safety cap.
     try {
       await Promise.race([
-        Promise.all(renegotiations),
-        new Promise(resolve => setTimeout(resolve, 3000))
+        Promise.allSettled(renegotiations),
+        new Promise(resolve => setTimeout(resolve, 8000))
       ]);
     } catch { /* proceed anyway */ }
 
@@ -1173,7 +1280,45 @@ class VoiceManager {
     } catch (e) { /* setParameters not supported */ }
   }
 
-  async _renegotiate(userId, connection) {
+  async _waitForSignalingStable(connection, timeoutMs = 5000) {
+    if (!connection || connection.signalingState === 'stable') return true;
+    return await new Promise((resolve) => {
+      let settled = false;
+      const onChange = () => {
+        if (settled) return;
+        if (connection.signalingState === 'stable') {
+          settled = true;
+          connection.removeEventListener('signalingstatechange', onChange);
+          resolve(true);
+        }
+      };
+      connection.addEventListener('signalingstatechange', onChange);
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        connection.removeEventListener('signalingstatechange', onChange);
+        resolve(connection.signalingState === 'stable');
+      }, timeoutMs);
+    });
+  }
+
+  _drainQueuedRenegotiation(userId) {
+    const peer = this.peers.get(userId);
+    if (!peer || peer._makingOffer || peer._awaitingAnswer || !peer._renegotiateQueued) return;
+    const wantsIceRestart = !!peer._queuedIceRestart;
+    peer._renegotiateQueued = false;
+    peer._queuedIceRestart = false;
+    this._renegotiate(userId, peer.connection, { iceRestart: wantsIceRestart }).catch(() => {});
+  }
+
+  async _renegotiate(userId, connection, { iceRestart = false } = {}) {
+    const peer = this.peers.get(userId);
+    if (!peer || peer.connection !== connection) return false;
+    if (peer._makingOffer || peer._awaitingAnswer) {
+      peer._renegotiateQueued = true;
+      peer._queuedIceRestart = peer._queuedIceRestart || iceRestart;
+      return false;
+    }
     // Wait for the signaling state to be stable before issuing a fresh
     // offer. RTCPeerConnection.createOffer() throws if called while a
     // previous local-offer or remote-offer is still pending, and the only
@@ -1181,39 +1326,41 @@ class VoiceManager {
     // peer with no video and no retry, which is a leading cause of the
     // "audio works, video tile is black" screen-share bug. Wait up to ~5s
     // for the connection to settle, then proceed. (#5347 v3.15.5)
+    peer._makingOffer = true;
     try {
       if (connection.signalingState !== 'stable') {
-        const ok = await new Promise((resolve) => {
-          let settled = false;
-          const onChange = () => {
-            if (settled) return;
-            if (connection.signalingState === 'stable') {
-              settled = true;
-              connection.removeEventListener('signalingstatechange', onChange);
-              resolve(true);
-            }
-          };
-          connection.addEventListener('signalingstatechange', onChange);
-          setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            connection.removeEventListener('signalingstatechange', onChange);
-            resolve(connection.signalingState === 'stable');
-          }, 5000);
-        });
+        const ok = await this._waitForSignalingStable(connection, 5000);
         if (!ok) {
-          console.warn('[Voice] _renegotiate: signaling stayed', connection.signalingState, 'for peer', userId, '— forcing offer anyway');
+          console.warn('[Voice] _renegotiate: signaling stayed', connection.signalingState, 'for peer', userId, '— queueing retry');
+          peer._renegotiateQueued = true;
+          peer._queuedIceRestart = peer._queuedIceRestart || iceRestart;
+          return false;
         }
       }
-      const offer = await connection.createOffer();
+      const offer = await connection.createOffer(iceRestart ? { iceRestart: true } : undefined);
+      if (connection.signalingState !== 'stable') {
+        // Another incoming offer won the race while createOffer() was in flight.
+        // Leave one queued retry instead of forcing a stale local offer on top.
+        peer._renegotiateQueued = true;
+        peer._queuedIceRestart = peer._queuedIceRestart || iceRestart;
+        return false;
+      }
       await connection.setLocalDescription(offer);
+      peer._awaitingAnswer = true;
       this.socket.emit('voice-offer', {
         code: this.currentChannel,
         targetUserId: userId,
         offer: offer
       });
+      return true;
     } catch (err) {
       console.error('Renegotiation failed for peer', userId, err);
+      return false;
+    } finally {
+      const latestPeer = this.peers.get(userId);
+      if (latestPeer && latestPeer.connection === connection) {
+        latestPeer._makingOffer = false;
+      }
     }
   }
 
@@ -1304,7 +1451,19 @@ class VoiceManager {
           };
           track.onmute = () => {};
           track.onended = () => {
-            if (this.onScreenStream) this.onScreenStream(userId, null);
+            // Don't tear down the tile if the sharer is in the middle of a
+            // stop+restart cycle. Their old track ends naturally as part of
+            // stopScreenShare, but the screenSharers set (driven by the
+            // server's screen-share-started/stopped events) is still true
+            // until we get screen-share-stopped. If we cleared the tile
+            // here on every onended, the viewer would see the tile vanish
+            // and the next track would have to recreate everything — which
+            // is fine in theory but masked the stuck-transceiver bug for
+            // months by making it look like "the new share never arrived".
+            // Only clear when the server has actually told us they stopped.
+            if (!this.screenSharers.has(userId)) {
+              if (this.onScreenStream) this.onScreenStream(userId, null);
+            }
           };
           // Check if any deferred audio belongs to this screen stream
           for (let i = deferredAudio.length - 1; i >= 0; i--) {
@@ -1368,6 +1527,17 @@ class VoiceManager {
       }
     };
 
+    connection.addEventListener('signalingstatechange', () => {
+      const latestPeer = this.peers.get(userId);
+      if (!latestPeer || latestPeer.connection !== connection) return;
+      if (connection.signalingState === 'stable') {
+        if (latestPeer._awaitingAnswer) {
+          latestPeer._awaitingAnswer = false;
+        }
+        this._drainQueuedRenegotiation(userId);
+      }
+    });
+
     connection.onconnectionstatechange = () => {
       const state = connection.connectionState;
       if (state === 'failed') {
@@ -1395,22 +1565,19 @@ class VoiceManager {
       }
     };
 
-    this.peers.set(userId, { connection, stream: remoteAudioStream, username });
+    this.peers.set(userId, {
+      connection,
+      stream: remoteAudioStream,
+      username,
+      _makingOffer: false,
+      _awaitingAnswer: false,
+      _renegotiateQueued: false,
+      _queuedIceRestart: false,
+    });
 
     // If we're the initiator, create and send an offer
     if (createOffer) {
-      try {
-        const offer = await connection.createOffer();
-        await connection.setLocalDescription(offer);
-
-        this.socket.emit('voice-offer', {
-          code: this.currentChannel,
-          targetUserId: userId,
-          offer: offer
-        });
-      } catch (err) {
-        console.error('Error creating voice offer:', err);
-      }
+      await this._renegotiate(userId, connection);
     }
   }
 
@@ -1437,13 +1604,7 @@ class VoiceManager {
 
   async _restartIce(userId, connection) {
     try {
-      const offer = await connection.createOffer({ iceRestart: true });
-      await connection.setLocalDescription(offer);
-      this.socket.emit('voice-offer', {
-        code: this.currentChannel,
-        targetUserId: userId,
-        offer: offer
-      });
+      await this._renegotiate(userId, connection, { iceRestart: true });
     } catch (err) {
       console.error('ICE restart failed for', userId, '— removing peer:', err);
       this._removePeer(userId);
@@ -1684,6 +1845,21 @@ class VoiceManager {
     if (existingGain) {
       try { existingGain.disconnect(); } catch {}
       this.screenGainNodes.delete(userId);
+    }
+
+    // iOS Safari / WebKit: skip Web Audio routing for incoming screen audio
+    // — same WebKit bug as _playAudio above. Use native element playback
+    // so the captured system audio actually reaches the user's speaker.
+    if (_IS_IOS_WEBKIT) {
+      const savedVolume = Math.min(1, this._getSavedStreamVolume(userId));
+      if (this.isDeafened) {
+        audioEl.dataset.prevVolume = String(savedVolume);
+        audioEl.volume = 0;
+      } else {
+        audioEl.volume = savedVolume;
+      }
+      audioEl.play().catch(() => {});
+      return;
     }
 
     try {
@@ -2091,6 +2267,27 @@ class VoiceManager {
     // for the same user when tracks are added (mic + screen audio).
     if (this.gainNodes.has(userId)) {
       audioEl.volume = 0;
+      return;
+    }
+
+    // iOS Safari / WebKit: createMediaStreamSource() from a remote PC track
+    // is silent (WebKit bug, unfixed for years). Skip the entire Web Audio
+    // routing and let the <audio> element play natively. Trade-off: no
+    // per-user volume boost above 100% and no remote-speaker analyser, but
+    // audio actually plays — which is the whole point. Local mic talk
+    // detection still works because that's getUserMedia-side, not PC-side.
+    if (_IS_IOS_WEBKIT) {
+      const savedVolume = Math.min(1, this._getSavedVolume(userId));
+      if (this.isDeafened) {
+        audioEl.dataset.prevVolume = String(savedVolume);
+        audioEl.volume = 0;
+      } else {
+        audioEl.volume = savedVolume;
+      }
+      // iOS also blocks play() outside a user gesture; ontrack fires after
+      // the join-voice tap so we should be fine, but kick play() anyway
+      // for safety and swallow the rejection if it ever happens.
+      audioEl.play().catch(() => {});
       return;
     }
 
