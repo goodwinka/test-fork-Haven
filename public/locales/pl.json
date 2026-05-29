@@ -1591,6 +1591,7 @@
     "promote_channel": "Promować \"{{name}}\" do kanału najwyższego poziomu?",
     "delete_message": "Usunąć tę wiadomość?",
     "pin_message": "Przypiąć tę wiadomość?",
+    "unpin_message": "Odpiąć tę wiadomość?",
     "delete_user": "Czy na PEWNO chcesz usunąć {{username}}? Tej operacji nie można cofnąć.",
     "delete_account": "Czy jesteś ABSOLUTNIE pewien? Twoje konto zniknie na zawsze.",
     "clear_invite_code": "Wyczyścić kod zaproszenia do serwera? Nikt ze starym kodem nie będzie mógł go użyć.",

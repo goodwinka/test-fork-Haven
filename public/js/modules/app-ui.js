@@ -1380,6 +1380,66 @@ _setupUI() {
     document.getElementById('pinned-panel').style.display = 'none';
   });
 
+  // Open pinned messages in fullscreen (maximized PiP)
+  const pinnedFullscreenBtn = document.getElementById('pinned-fullscreen-btn');
+  if (pinnedFullscreenBtn) pinnedFullscreenBtn.addEventListener('click', () => {
+    document.getElementById('pinned-panel').style.display = 'none';
+    this._openPinsPiP?.(this._lastPins || []);
+    const panel = document.getElementById('pins-pip-panel');
+    if (panel) panel.classList.add('pins-pip-maximized');
+  });
+
+  // Pop pinned messages out to the floating PiP panel
+  const pinnedPopupBtn = document.getElementById('pinned-popup-btn');
+  if (pinnedPopupBtn) pinnedPopupBtn.addEventListener('click', () => {
+    // Hide the sidebar panel first
+    document.getElementById('pinned-panel').style.display = 'none';
+    this._openPinsPiP?.(this._lastPins || []);
+  });
+
+  // Pins PiP: close button
+  const pinsPipClose = document.getElementById('pins-pip-close');
+  if (pinsPipClose) pinsPipClose.addEventListener('click', () => this._closePinsPiP?.());
+
+  // Pins PiP: fullscreen toggle button
+  const pinsPipFullscreen = document.getElementById('pins-pip-fullscreen');
+  if (pinsPipFullscreen) pinsPipFullscreen.addEventListener('click', () => {
+    const panel = document.getElementById('pins-pip-panel');
+    if (panel) panel.classList.toggle('pins-pip-maximized');
+  });
+
+  // Pins PiP: pop-in button — close PiP and re-open the sidebar panel
+  const pinsPipPopin = document.getElementById('pins-pip-popin');
+  if (pinsPipPopin) pinsPipPopin.addEventListener('click', () => {
+    this._closePinsPiP?.();
+    if (this.currentChannel) this.socket.emit('get-pinned-messages', { code: this.currentChannel });
+  });
+
+  // Pins PiP: delegated click handler for the pin list
+  // - Click on an item   → jump to message (PiP stays open)
+  // - Click on unpin btn → confirm modal + socket emit
+  const pinsPipList = document.getElementById('pins-pip-list');
+  if (pinsPipList) {
+    pinsPipList.addEventListener('click', async (e) => {
+      // Unpin button — handled first; stops propagation so item click doesn't also fire
+      const unpinBtn = e.target.closest('.pinned-unpin-btn');
+      if (unpinBtn) {
+        e.stopPropagation();
+        const msgId = parseInt(unpinBtn.dataset.msgId, 10);
+        if (!msgId) return;
+        const ok = await this._showConfirmModal?.(t('confirm.unpin_message'), '');
+        if (ok) this.socket.emit('unpin-message', { messageId: msgId });
+        return;
+      }
+      // Click anywhere else on a pinned item → jump to that message in the channel
+      const item = e.target.closest('.pinned-item');
+      if (item) {
+        const msgId = parseInt(item.dataset.msgId, 10);
+        if (msgId) this._jumpToMessage?.(msgId);
+      }
+    });
+  }
+
   // ── Channel media gallery (#5350) ──
   const galleryBtn = document.getElementById('gallery-toggle-btn');
   if (galleryBtn) {
@@ -2079,17 +2139,24 @@ _setupUI() {
     }
   }
 
-  // PiP input area height resize — drag the top handle upward to expand the textarea
+  // PiP input area height resize — drag the top handle upward to expand the textarea.
+  // Used by DM PiP, thread input, AND the main channel composer (#5327).
+  // We set both `height` and `min-height` inline so the auto-grow `input`
+  // handler (which sets `height = 'auto'` then caps at a small default) can't
+  // collapse the textarea back down after the user has manually expanded it.
   document.querySelectorAll('.pip-input-resizer').forEach(handle => {
     let startY = 0;
     let startHeight = 0;
     let ta = null;
+    let cap = 600;
 
     const onMove = (e) => {
       if (!ta) return;
       const delta = startY - e.clientY; // positive when dragging up
-      const newHeight = Math.max(34, Math.min(200, startHeight + delta));
+      const newHeight = Math.max(34, Math.min(cap, startHeight + delta));
       ta.style.height = `${newHeight}px`;
+      ta.style.minHeight = `${newHeight}px`;
+      ta.style.maxHeight = `${cap}px`;
     };
 
     const onUp = () => {
@@ -2103,6 +2170,9 @@ _setupUI() {
       if (!ta) return;
       startY = e.clientY;
       startHeight = ta.getBoundingClientRect().height;
+      // Cap manual expansion at ~60% of viewport so the textarea can never
+      // swallow the entire chat pane. Min 200px on tiny windows.
+      cap = Math.max(200, Math.floor(window.innerHeight * 0.6));
       e.preventDefault();
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
@@ -4064,7 +4134,7 @@ _addServer() {
   } else {
     // Adding new server
     const icon = iconInput || null;
-    if (this.serverManager.add(name, url, icon)) {
+    if (this.serverManager.add(name, url, icon, { userInitiated: true })) {
       document.getElementById('add-server-modal').style.display = 'none';
       this._renderServerBar();
       this._showToast(t('toasts.server_added', { name }), 'success');
@@ -5282,7 +5352,7 @@ _uploadWithProgress(url, formData) {
   });
 },
 
-async _uploadImage(file, targetCode, bundled = false) {
+async _uploadImage(file, targetCode, bundled = false, personaPrefix = '') {
   if (!this.currentChannel && !targetCode) return;
   // Capture the target channel NOW (before any await) so a mid-upload channel
   // switch doesn't send the image to the wrong channel.
@@ -5321,8 +5391,9 @@ async _uploadImage(file, targetCode, bundled = false) {
       });
       this.notifications.play('sent');
     } catch (err) {
-      console.warn('[E2E] Image encryption failed:', err);
-      this._showToast(t('toasts.encrypted_image_failed'), 'error');
+      console.error('[E2E] Image encryption failed:', err);
+      const detail = err?.message ? ` — ${err.message}` : '';
+      this._showToast(`${t('toasts.encrypted_image_failed')}${detail}`, 'error');
     }
     return;
   }
@@ -5340,10 +5411,11 @@ async _uploadImage(file, targetCode, bundled = false) {
       data = await this._uploadWithProgress('/api/upload', formData);
     }
 
-    // Send the image URL as a message to the channel that was active at upload time
+    // Send the image URL as a message to the channel that was active at upload time.
+    // Prepend persona prefix if this image is bundled with a persona text message.
     this.socket.emit('send-message', {
       code: targetChannel,
-      content: data.url,
+      content: personaPrefix + data.url,
       isImage: true,
       ...(bundled && { bundled: true })
     });

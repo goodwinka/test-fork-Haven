@@ -3045,7 +3045,8 @@ _startEditMessage(msgEl, msgId) {
       }
     }
 
-    this.socket.emit('edit-message', { messageId: msgId, content: newContent });
+    const channelCode = pipContext || this.currentChannel;
+    this.socket.emit('edit-message', { messageId: msgId, content: newContent, channelCode });
     cancel(); // will be updated by the server event
   });
 

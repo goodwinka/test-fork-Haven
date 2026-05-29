@@ -68,7 +68,7 @@ module.exports = function register(socket, ctx) {
     if (name.length > 50) {
       return socket.emit('error-msg', 'Channel name too long (max 50)');
     }
-    if (!/^[\w\s\-!?.,'\p{Emoji_Presentation}\p{Extended_Pictographic}\p{Emoji}\uFE0F\u200D]+$/iu.test(name)) {
+    if (!/^[\w\s\-!?.,'\p{L}\p{M}\p{Emoji_Presentation}\p{Extended_Pictographic}\p{Emoji}\uFE0F\u200D]+$/u.test(name)) {
       return socket.emit('error-msg', 'Channel name contains invalid characters');
     }
 
@@ -165,7 +165,7 @@ module.exports = function register(socket, ctx) {
     const name = typeof data.name === 'string' ? data.name.trim() : '';
     if (!name || name.length === 0) return socket.emit('error-msg', 'Channel name required');
     if (name.length > 50) return socket.emit('error-msg', 'Channel name too long (max 50)');
-    if (!/^[\w\s\-!?.,'\p{Emoji_Presentation}\p{Extended_Pictographic}\p{Emoji}\uFE0F\u200D]+$/iu.test(name)) {
+    if (!/^[\w\s\-!?.,'\p{L}\p{M}\p{Emoji_Presentation}\p{Extended_Pictographic}\p{Emoji}\uFE0F\u200D]+$/u.test(name)) {
       return socket.emit('error-msg', 'Channel name contains invalid characters');
     }
 
@@ -515,7 +515,7 @@ module.exports = function register(socket, ctx) {
     if (!name || name.length === 0 || name.length > 50) {
       return socket.emit('error-msg', 'Channel name must be 1-50 characters');
     }
-    if (!/^[\w\s\-!?.,'\p{Emoji_Presentation}\p{Extended_Pictographic}\p{Emoji}\uFE0F\u200D]+$/iu.test(name)) {
+    if (!/^[\w\s\-!?.,'\p{L}\p{M}\p{Emoji_Presentation}\p{Extended_Pictographic}\p{Emoji}\uFE0F\u200D]+$/u.test(name)) {
       return socket.emit('error-msg', 'Channel name contains invalid characters');
     }
 
@@ -558,7 +558,7 @@ module.exports = function register(socket, ctx) {
     if (!name || name.length === 0 || name.length > 50) {
       return socket.emit('error-msg', 'Sub-channel name must be 1-50 characters');
     }
-    if (!/^[\w\s\-!?.,'\p{Emoji_Presentation}\p{Extended_Pictographic}\p{Emoji}\uFE0F\u200D]+$/iu.test(name)) {
+    if (!/^[\w\s\-!?.,'\p{L}\p{M}\p{Emoji_Presentation}\p{Extended_Pictographic}\p{Emoji}\uFE0F\u200D]+$/u.test(name)) {
       return socket.emit('error-msg', 'Sub-channel name contains invalid characters');
     }
 
@@ -589,6 +589,37 @@ module.exports = function register(socket, ctx) {
       const membersToAdd = isPrivate ? [{ user_id: socket.user.id }] : parentMembers;
       const insertMember = db.prepare('INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)');
       membersToAdd.forEach(m => insertMember.run(result.lastInsertRowid, m.user_id));
+
+      // (#5328) Inherit role-channel-access from the parent channel so that
+      // roles configured to grant/revoke access on the parent automatically
+      // apply to newly-created sub-channels. Without this, server owners had
+      // to re-add every role to every new sub-channel manually. Admins can
+      // still customize per-sub-channel access afterwards via the role UI.
+      try {
+        const parentAccess = db.prepare(
+          'SELECT role_id, grant_on_promote, revoke_on_demote FROM role_channel_access WHERE channel_id = ?'
+        ).all(parentChannel.id);
+        if (parentAccess.length) {
+          const insAccess = db.prepare(
+            'INSERT OR IGNORE INTO role_channel_access (role_id, channel_id, grant_on_promote, revoke_on_demote) VALUES (?, ?, ?, ?)'
+          );
+          const insMemberRole = db.prepare(
+            'INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)'
+          );
+          parentAccess.forEach(a => {
+            insAccess.run(a.role_id, result.lastInsertRowid, a.grant_on_promote, a.revoke_on_demote);
+            // Mirror channel membership for current role holders if the role
+            // is configured to grant access on promote. Private sub-channels
+            // also receive role-based members so the role still works there.
+            if (a.grant_on_promote) {
+              const holders = db.prepare('SELECT DISTINCT user_id FROM user_roles WHERE role_id = ?').all(a.role_id);
+              holders.forEach(h => insMemberRole.run(result.lastInsertRowid, h.user_id));
+            }
+          });
+        }
+      } catch (rcaErr) {
+        console.error('Sub-channel role inheritance error:', rcaErr);
+      }
 
       broadcastChannelLists();
     } catch (err) {

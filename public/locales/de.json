@@ -1532,6 +1532,7 @@
     "promote_channel": "„{{name}}“ zum Hauptkanal befördern?",
     "delete_message": "Diese Nachricht löschen?",
     "pin_message": "Diese Nachricht anheften?",
+    "unpin_message": "Diese Nachricht lösen?",
     "delete_user": "Bist du dir SICHER, dass du {{username}} löschen möchtest? Dies kann nicht rückgängig gemacht werden.",
     "delete_account": "Bist du dir ABSOLUT sicher? Dein Konto wird für immer gelöscht.",
     "clear_invite_code": "Den Server-Einladungscode löschen? Wer den alten Code hat, kann ihn nicht mehr verwenden.",

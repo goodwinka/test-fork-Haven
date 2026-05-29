@@ -2296,8 +2296,9 @@ async _maybeUploadEncryptedDmFile(file, code, ch) {
     if (code === this.currentChannel) this._clearReply();
     return true;
   } catch (err) {
-    console.warn('[E2E] File encryption failed:', err);
-    this._showToast(t('toasts.encrypted_image_failed') || 'Encrypted upload failed', 'error');
+    console.error('[E2E] File encryption failed:', err);
+    const _detail = err?.message ? ` — ${err.message}` : '';
+    this._showToast(`${t('toasts.encrypted_image_failed') || 'Encrypted upload failed'}${_detail}`, 'error');
     return true;
   }
 },

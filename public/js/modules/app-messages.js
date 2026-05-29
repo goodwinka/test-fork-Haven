@@ -213,9 +213,24 @@ async _sendMessage() {
   }
 
   // Upload queued images — mark as bundled when text was also sent so
-  // the server knows not to apply a second slow-mode tick for them (#5342)
+  // the server knows not to apply a second slow-mode tick for them (#5342).
+  // If the text message used a persona prefix (::Name ...), pass it along so
+  // the bundled images are attributed to the same persona.
   if (hasImages) {
-    this._flushImageQueue(!!content);
+    let personaPrefix = '';
+    if (content && content.startsWith('::') && Array.isArray(this._personas)) {
+      const lower = content.toLowerCase();
+      const sorted = [...this._personas].sort((a, b) => b.name.length - a.name.length);
+      for (const p of sorted) {
+        const base = '::' + p.name.toLowerCase();
+        if (lower.startsWith(base + ' ') || lower.startsWith(base + ': ') ||
+            (lower.startsWith(base + ':') && content.length > base.length + 1)) {
+          personaPrefix = '::' + p.name + ' ';
+          break;
+        }
+      }
+    }
+    this._flushImageQueue(!!content, personaPrefix);
   }
 },
 
@@ -992,11 +1007,17 @@ _appendWelcomeMessage(text) {
 // ── Pinned Messages Panel ─────────────────────────────
 
 _renderPinnedPanel(pins) {
+  // Always cache the latest pin list — used by the pop-out button and by
+  // the PiP to refresh after a pin/unpin event without a full re-open.
+  this._lastPins = pins;
+
   const panel = document.getElementById('pinned-panel');
   const list = document.getElementById('pinned-list');
   const count = document.getElementById('pinned-count');
 
   count.textContent = `📌 ${t(pins.length !== 1 ? 'pinned_panel.count_other' : 'pinned_panel.count_one', { count: pins.length })}`;
+
+  const canUnpin = this.user?.isAdmin || this._hasPerm('pin_message');
 
   if (pins.length === 0) {
     list.innerHTML = `<p class="muted-text" style="padding:12px">${t('pinned_panel.no_messages')}</p>`;
@@ -1008,12 +1029,40 @@ _renderPinnedPanel(pins) {
           <span class="pinned-item-time">${this._formatTime(p.created_at)}</span>
         </div>
         <div class="pinned-item-content">${this._formatContent(p.content)}</div>
-        <div class="pinned-item-footer">${t('pinned_panel.pinned_by', { user: this._escapeHtml(p.pinned_by) })}</div>
+        <div class="pinned-item-footer" style="display:flex;align-items:center;justify-content:space-between">
+          <span>${t('pinned_panel.pinned_by', { user: this._escapeHtml(p.pinned_by) })}</span>
+          ${canUnpin ? `<button class="pinned-unpin-btn btn-xs" data-msg-id="${p.id}" title="${this._escapeHtml(t('msg_toolbar.unpin'))}">${this._escapeHtml(t('msg_toolbar.unpin'))}</button>` : ''}
+        </div>
       </div>
     `).join('');
   }
-  panel.style.display = 'block';
 
+  // When this render was triggered by a PiP auto-refresh (message-pinned
+  // event), skip showing/re-showing the sidebar panel — only update it if
+  // the user already has it visible.
+  const silentRefresh = this._pinsPipSilentRefresh;
+  this._pinsPipSilentRefresh = false;
+  if (silentRefresh) {
+    if (panel.style.display === 'block') {
+      // Sidebar is already open — re-wire its click handlers to the fresh DOM
+      this._rewirePinnedSidebarHandlers(list, panel);
+    }
+  } else {
+    panel.style.display = 'block';
+    this._rewirePinnedSidebarHandlers(list, panel);
+  }
+
+  // If the PiP is currently open, refresh it with the latest pin data too.
+  const pipPanel = document.getElementById('pins-pip-panel');
+  if (pipPanel && pipPanel.style.display !== 'none') {
+    this._renderPinsPiPList(pins);
+  }
+},
+
+// Wire the sidebar pinned-panel click handlers.  Extracted so both the
+// normal open path and the silent-refresh path can call it without
+// repeating code.
+_rewirePinnedSidebarHandlers(list, panel) {
   // Click to scroll to pinned message (uses _jumpToMessage to handle
   // messages that have been trimmed from the DOM)
   list.querySelectorAll('.pinned-item').forEach(item => {
@@ -1023,6 +1072,136 @@ _renderPinnedPanel(pins) {
       if (msgId) this._jumpToMessage(msgId);
     });
   });
+
+  // Unpin buttons — stop propagation so click doesn't also jump to message
+  list.querySelectorAll('.pinned-unpin-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const msgId = parseInt(btn.dataset.msgId, 10);
+      if (!msgId) return;
+      const ok = await this._showConfirmModal(t('confirm.unpin_message'), '');
+      if (ok) this.socket.emit('unpin-message', { messageId: msgId });
+    });
+  });
+},
+
+// ── Pinned Messages PiP ───────────────────────────────
+
+/** Open the floating PiP overlay for pinned messages. */
+_openPinsPiP(pins) {
+  const panel = document.getElementById('pins-pip-panel');
+  if (!panel) return;
+  this._pinsPipChannelCode = this.currentChannel;
+  panel.style.display = 'flex';
+
+  // Title: channel name
+  const titleEl = document.getElementById('pins-pip-title');
+  if (titleEl) {
+    const ch = (this.channels || []).find(c => c.code === this.currentChannel);
+    titleEl.textContent = ch ? `# ${ch.name}` : (this.currentChannel || 'Channel');
+  }
+
+  this._renderPinsPiPList(pins || []);
+  this._applyPinsPiPGeometry(panel);
+  this._bindPinsPiPDrag();
+},
+
+/** Close the pinned messages PiP. */
+_closePinsPiP() {
+  this._pinsPipChannelCode = null;
+  const panel = document.getElementById('pins-pip-panel');
+  if (panel) panel.style.display = 'none';
+},
+
+/** Render the pin list inside the PiP overlay.
+ *  Uses delegated click handlers (wired once in app-ui.js) — no inline
+ *  event listeners attached here to avoid double-binding on refresh. */
+_renderPinsPiPList(pins) {
+  const list = document.getElementById('pins-pip-list');
+  if (!list) return;
+  const canUnpin = this.user?.isAdmin || this._hasPerm('pin_message');
+  if (!pins || pins.length === 0) {
+    list.innerHTML = `<p class="muted-text" style="padding:12px">${t('pinned_panel.no_messages')}</p>`;
+    return;
+  }
+  list.innerHTML = pins.map(p => `
+    <div class="pinned-item" data-msg-id="${p.id}">
+      <div class="pinned-item-header">
+        <span class="pinned-item-author" style="color:${this._getUserColor(p.username)}">${this._escapeHtml(this._getNickname(p.user_id, p.username))}</span>
+        <span class="pinned-item-time">${this._formatTime(p.created_at)}</span>
+      </div>
+      <div class="pinned-item-content">${this._formatContent(p.content)}</div>
+      <div class="pinned-item-footer" style="display:flex;align-items:center;justify-content:space-between">
+        <span>${t('pinned_panel.pinned_by', { user: this._escapeHtml(p.pinned_by) })}</span>
+        ${canUnpin ? `<button class="pinned-unpin-btn btn-xs" data-msg-id="${p.id}" title="${this._escapeHtml(t('msg_toolbar.unpin'))}">${this._escapeHtml(t('msg_toolbar.unpin'))}</button>` : ''}
+      </div>
+    </div>
+  `).join('');
+},
+
+/** Restore saved PiP position + size from localStorage. */
+_applyPinsPiPGeometry(panel) {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('haven_pins_pip_rect') || 'null'); } catch {}
+  const minW = 280, minH = 220;
+  const maxW = Math.min(600, window.innerWidth - 28);
+  const maxH = Math.max(minH, window.innerHeight - 28);
+  const width  = Math.max(minW, Math.min(maxW, (saved && saved.width)  || 360));
+  const height = Math.max(minH, Math.min(maxH, (saved && saved.height) || 440));
+  const defaultLeft = Math.max(0, window.innerWidth  - width  - 20);
+  const defaultTop  = Math.max(0, window.innerHeight - height - 80);
+  const left = Math.max(0, Math.min(window.innerWidth  - width,  (saved && Number.isFinite(saved.left)) ? saved.left : defaultLeft));
+  const top  = Math.max(0, Math.min(window.innerHeight - height, (saved && Number.isFinite(saved.top))  ? saved.top  : defaultTop));
+  panel.style.width  = `${Math.round(width)}px`;
+  panel.style.height = `${Math.round(height)}px`;
+  panel.style.left   = `${Math.round(left)}px`;
+  panel.style.top    = `${Math.round(top)}px`;
+},
+
+/** Bind drag-to-move on the PiP header (called once). */
+_bindPinsPiPDrag() {
+  if (this._pinsPipDragBound) return;
+  this._pinsPipDragBound = true;
+  const panel = document.getElementById('pins-pip-panel');
+  if (!panel) return;
+  const header = panel.querySelector('.pins-pip-header');
+  if (!header) return;
+  let startX = 0, startY = 0, startLeft = 0, startTop = 0, dragging = false;
+  header.addEventListener('mousedown', (e) => {
+    if (e.target.closest('button, a')) return;
+    if (panel.classList.contains('pins-pip-maximized')) return;
+    dragging = true;
+    startX = e.clientX; startY = e.clientY;
+    const r = panel.getBoundingClientRect();
+    startLeft = r.left; startTop = r.top;
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const w = panel.offsetWidth, h = panel.offsetHeight;
+    const left = Math.max(0, Math.min(window.innerWidth  - w, startLeft + (e.clientX - startX)));
+    const top  = Math.max(0, Math.min(window.innerHeight - h, startTop  + (e.clientY - startY)));
+    panel.style.left = `${left}px`;
+    panel.style.top  = `${top}px`;
+  });
+  const persist = () => {
+    if (!panel || panel.style.display === 'none') return;
+    try {
+      localStorage.setItem('haven_pins_pip_rect', JSON.stringify({
+        left:   parseInt(panel.style.left,  10) || 0,
+        top:    parseInt(panel.style.top,   10) || 0,
+        width:  panel.offsetWidth,
+        height: panel.offsetHeight
+      }));
+    } catch {}
+  };
+  window.addEventListener('mouseup', () => {
+    if (dragging) { dragging = false; persist(); }
+  });
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(() => persist());
+    ro.observe(panel);
+  }
 },
 
 // ── Link Previews ─────────────────────────────────────

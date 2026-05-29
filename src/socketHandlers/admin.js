@@ -273,7 +273,8 @@ module.exports = function register(socket, ctx) {
 
   socket.on('create-webhook', (data) => {
     if (!data || typeof data !== 'object') return;
-    if (!socket.user.isAdmin) return socket.emit('error-msg', 'Only admins can create webhooks');
+    const _canWebhooks = socket.user.isAdmin || userHasPermission(socket.user.id, 'manage_webhooks');
+    if (!_canWebhooks) return socket.emit('error-msg', 'You don\'t have permission to manage webhooks');
 
     if (data.channelCode) {
       // Per-channel variant
@@ -302,7 +303,8 @@ module.exports = function register(socket, ctx) {
         socket.emit('error-msg', 'Failed to create webhook');
       }
     } else {
-      // Bot-manager variant
+      // Bot-manager variant — admin only
+      if (!socket.user.isAdmin) return socket.emit('error-msg', 'Only admins can manage webhooks');
       const name = typeof data.name === 'string' ? data.name.trim().slice(0, 32) : '';
       const channelId = parseInt(data.channel_id);
       const avatarUrl = typeof data.avatar_url === 'string' ? data.avatar_url.trim().slice(0, 512) : null;
@@ -331,7 +333,8 @@ module.exports = function register(socket, ctx) {
   });
 
   socket.on('get-webhooks', (data) => {
-    if (!socket.user.isAdmin) return;
+    const _canWebhooks = socket.user.isAdmin || userHasPermission(socket.user.id, 'manage_webhooks');
+    if (!_canWebhooks) return;
 
     if (data && typeof data === 'object' && data.channelCode) {
       // Per-channel variant
@@ -346,7 +349,8 @@ module.exports = function register(socket, ctx) {
       ).all(channel.id);
       socket.emit('webhooks-list', { channelCode, webhooks });
     } else {
-      // Bot-manager variant (all webhooks)
+      // Bot-manager variant (all webhooks) — admin only
+      if (!socket.user.isAdmin) return;
       const webhooks = db.prepare(`
         SELECT w.id, w.channel_id, w.name, w.token, w.avatar_url, w.is_active, w.created_at,
                w.callback_url, w.callback_secret,
@@ -362,7 +366,10 @@ module.exports = function register(socket, ctx) {
 
   socket.on('delete-webhook', (data) => {
     if (!data || typeof data !== 'object') return;
-    if (!socket.user.isAdmin) return socket.emit('error-msg', 'Only admins can manage webhooks');
+    const _canWebhooks = socket.user.isAdmin || userHasPermission(socket.user.id, 'manage_webhooks');
+    if (!_canWebhooks) return socket.emit('error-msg', 'You don\'t have permission to manage webhooks');
+    // Bot-manager variant (uses data.id only) is admin-only
+    if (!socket.user.isAdmin && !data.webhookId) return socket.emit('error-msg', 'Only admins can manage webhooks');
 
     // Per-channel variant uses webhookId, bot-manager uses id
     const webhookId = parseInt(data.webhookId || data.id);
@@ -391,7 +398,10 @@ module.exports = function register(socket, ctx) {
 
   socket.on('toggle-webhook', (data) => {
     if (!data || typeof data !== 'object') return;
-    if (!socket.user.isAdmin) return socket.emit('error-msg', 'Only admins can manage webhooks');
+    const _canWebhooks2 = socket.user.isAdmin || userHasPermission(socket.user.id, 'manage_webhooks');
+    if (!_canWebhooks2) return socket.emit('error-msg', 'You don\'t have permission to manage webhooks');
+    // Bot-manager variant (uses data.id only) is admin-only
+    if (!socket.user.isAdmin && !data.webhookId) return socket.emit('error-msg', 'Only admins can manage webhooks');
 
     const webhookId = parseInt(data.webhookId || data.id);
     if (!webhookId || isNaN(webhookId)) return;

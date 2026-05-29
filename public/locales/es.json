@@ -1532,6 +1532,7 @@
     "promote_channel": "¿Promover \"{{name}}\" a canal principal?",
     "delete_message": "¿Eliminar este mensaje?",
     "pin_message": "¿Fijar este mensaje?",
+    "unpin_message": "¿Desfijar este mensaje?",
     "delete_user": "¿Estás SEGURO de que quieres eliminar a {{username}}? Esta acción no se puede deshacer.",
     "delete_account": "¿Estás ABSOLUTAMENTE seguro? Tu cuenta desaparecerá para siempre.",
     "clear_invite_code": "¿Limpiar el código de invitación del servidor? Nadie con el código anterior podrá usarlo.",

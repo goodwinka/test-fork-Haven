@@ -8,7 +8,8 @@ module.exports = function register(socket, ctx) {
           pruneStaleVoiceUsers,
           getActiveMusicSyncState, getMusicQueuePayload } = ctx;
   const { channelUsers, voiceUsers, voiceLastActivity, activeMusic,
-          activeScreenSharers, activeWebcamUsers, streamViewers, pendingTempDelete } = state;
+          activeScreenSharers, activeWebcamUsers, streamViewers, pendingTempDelete,
+          pendingVoiceLeave } = state;
 
   // ── Local helper: broadcast stream/viewer info ──────────
   function broadcastStreamInfo(code) {
@@ -68,6 +69,20 @@ module.exports = function register(socket, ctx) {
     for (const [prevCode, room] of voiceUsers) {
       if (room.has(socket.user.id) && prevCode !== code) {
         handleVoiceLeave(socket, prevCode);
+      }
+    }
+
+    // Cancel any pending grace-period eviction for this user+channel.
+    // If we got here it means the user is consciously (re)joining via
+    // voice-join, so the deferred eviction from a prior disconnect must
+    // not fire later and yank them out.
+    if (pendingVoiceLeave) {
+      const pendingKey = `${socket.user.id}:${code}`;
+      const pending = pendingVoiceLeave.get(pendingKey);
+      if (pending) {
+        clearTimeout(pending.timer);
+        pendingVoiceLeave.delete(pendingKey);
+        console.log(`[VoiceDiag] voice-join cancelled pending eviction for ${socket.user.username} on ${code}`);
       }
     }
 
@@ -491,6 +506,19 @@ module.exports = function register(socket, ctx) {
     if (!data || typeof data !== 'object') return;
     const code = typeof data.code === 'string' ? data.code.trim() : '';
     if (!code || !/^[a-f0-9]{8}$/i.test(code)) return;
+    // Prune stale entries (sockets that have already disconnected but
+    // weren't cleaned up by handleVoiceLeave for whatever reason) BEFORE
+    // computing the response. Without this, after a server restart the
+    // requester can momentarily see the OLD pre-restart roster (or worse,
+    // duplicates while clients reconnect) and the right voice panel /
+    // sidebar count would stick on those ghosts until the next
+    // broadcastVoiceUsers tick.
+    const removed = pruneStaleVoiceUsers(code);
+    if (removed && removed.length) {
+      // Re-broadcast the freshly-pruned roster to everyone in the room
+      // so other clients also reconcile, not just the requester.
+      broadcastVoiceUsers(code);
+    }
     const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(code);
     const channelId = channel ? channel.id : null;
     const room = voiceUsers.get(code);
@@ -500,6 +528,99 @@ module.exports = function register(socket, ctx) {
           return { id: u.id, username: u.username, roleColor: role ? role.color : null, isMuted: u.isMuted || false, isDeafened: u.isDeafened || false };
         })
       : [];
+    // Diagnostic for the recurring "I vanished from my own voice panel"
+    // bug. If the client claims to be in voice on this channel but the
+    // server has no record of them, log loudly so we can see it in
+    // production logs. The client's voice-users-update self-heal will
+    // emit voice-rejoin a moment after receiving our response, which
+    // will rebind their voice slot.
+    if (data.iAmInVoice && socket.user && !users.some(u => u.id === socket.user.id)) {
+      const inAnyRoom = Array.from(voiceUsers.values()).some(r => r.has(socket.user.id));
+      console.warn(
+        `[VoiceDiag] request-voice-users from ${socket.user.username} (id=${socket.user.id}) ` +
+        `claims to be in voice on ${code} but server has no entry. ` +
+        `inAnyOtherVoiceRoom=${inAnyRoom}, currentSocketId=${socket.id}, ` +
+        `roomSize=${room ? room.size : 0}`
+      );
+
+      // ── SERVER-SIDE PROACTIVE HEAL ──────────────────────
+      // Don't just complain — reattach the user right here so the
+      // infinite watchdog loop ("self ABSENT → poll → still ABSENT")
+      // breaks immediately. The user has already proven (by being
+      // connected with a valid socket and claiming to be in voice on
+      // this channel) that they want to be in voice. We validate they
+      // are actually a member of the channel; if so, we add them back
+      // to voiceUsers, broadcast to peers, and send them a fresh
+      // voice-existing-users so they (re-)negotiate RTCPeerConnections
+      // with anyone who's in the room.
+      try {
+        const vch = db.prepare('SELECT id FROM channels WHERE code = ?').get(code);
+        if (!vch) {
+          console.warn(`[VoiceDiag] PROACTIVE HEAL skipped — channel ${code} not in DB; signalling client to clean up.`);
+          socket.emit('voice-channel-gone', { code });
+        } else {
+          const vMember = db.prepare(
+            'SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?'
+          ).get(vch.id, socket.user.id);
+          if (!vMember) {
+            console.warn(`[VoiceDiag] PROACTIVE HEAL skipped — ${socket.user.username} is not a member of channel ${code}; signalling client to clean up.`);
+            socket.emit('voice-channel-gone', { code });
+          } else {
+            // Cancel any pending grace-period eviction for this slot.
+            const pendingKey = `${socket.user.id}:${code}`;
+            const pending = pendingVoiceLeave && pendingVoiceLeave.get(pendingKey);
+            if (pending) {
+              clearTimeout(pending.timer);
+              pendingVoiceLeave.delete(pendingKey);
+              console.log(`[VoiceDiag] PROACTIVE HEAL cancelled pending grace eviction for ${socket.user.username} on ${code}`);
+            }
+            if (!voiceUsers.has(code)) voiceUsers.set(code, new Map());
+            socket.join(`voice:${code}`);
+            voiceUsers.get(code).set(socket.user.id, {
+              id: socket.user.id,
+              username: socket.user.displayName,
+              socketId: socket.id,
+              isMuted: false,
+              isDeafened: false
+            });
+            voiceLastActivity.set(socket.user.id, Date.now());
+            console.log(`[VoiceDiag] PROACTIVE HEAL added ${socket.user.username} (id=${socket.user.id}) to voiceUsers[${code}]. Broadcasting to peers + sending voice-existing-users.`);
+
+            const existingUsers = Array.from(voiceUsers.get(code).values())
+              .filter(u => u.id !== socket.user.id);
+            const vchSettings = db.prepare('SELECT voice_bitrate FROM channels WHERE code = ?').get(code);
+            socket.emit('voice-existing-users', {
+              channelCode: code,
+              users: existingUsers.map(u => ({ id: u.id, username: u.username })),
+              voiceBitrate: vchSettings ? (vchSettings.voice_bitrate || 0) : 0
+            });
+            // Notify existing peers that we're (back) in the room so
+            // they wait for our offer. (voice-existing-users above tells
+            // us to make the offers.)
+            existingUsers.forEach(u => {
+              io.to(u.socketId).emit('voice-user-joined', {
+                channelCode: code,
+                user: { id: socket.user.id, username: socket.user.displayName }
+              });
+            });
+            broadcastVoiceUsers(code);
+            broadcastStreamInfo(code);
+            // Re-fetch the room so the response below includes us.
+            const healedRoom = voiceUsers.get(code);
+            const healedUsers = healedRoom
+              ? Array.from(healedRoom.values()).map(u => {
+                  const role = getUserHighestRole(u.id, vch.id);
+                  return { id: u.id, username: u.username, roleColor: role ? role.color : null, isMuted: u.isMuted || false, isDeafened: u.isDeafened || false };
+                })
+              : [];
+            socket.emit('voice-users-update', { channelCode: code, users: healedUsers });
+            return; // We've already sent the update — don't double-send below.
+          }
+        }
+      } catch (e) {
+        console.warn(`[VoiceDiag] PROACTIVE HEAL failed:`, e && e.message);
+      }
+    }
     socket.emit('voice-users-update', { channelCode: code, users });
   });
 
@@ -556,16 +677,78 @@ module.exports = function register(socket, ctx) {
 
   // ── Voice rejoin (after reconnect) ──────────────────────
   socket.on('voice-rejoin', (data) => {
-    if (!data || typeof data !== 'object') return;
+    // VERY top-of-handler log so we can prove the event reached us, and
+    // catch every silent early-return below.
+    console.log(`[VoiceDiag] voice-rejoin RECEIVED from ${socket.user?.username} (id=${socket.user?.id}) socket=${socket.id} data=${JSON.stringify(data)}`);
+    if (!data || typeof data !== 'object') {
+      console.warn(`[VoiceDiag] voice-rejoin REJECTED — bad payload`);
+      return;
+    }
     const code = typeof data.code === 'string' ? data.code.trim() : '';
-    if (!code || !/^[a-f0-9]{8}$/i.test(code)) return;
+    if (!code || !/^[a-f0-9]{8}$/i.test(code)) {
+      console.warn(`[VoiceDiag] voice-rejoin REJECTED — invalid code "${code}"`);
+      return;
+    }
 
     const vch = db.prepare('SELECT id FROM channels WHERE code = ?').get(code);
-    if (!vch) return;
+    if (!vch) {
+      console.warn(`[VoiceDiag] voice-rejoin REJECTED — channel ${code} not in DB (user=${socket.user.username}). Telling client channel is gone so it can clean local state.`);
+      // Break the infinite watchdog/self-heal loop — tell the client the
+      // channel no longer exists so it stops thinking it's in voice.
+      socket.emit('voice-channel-gone', { code });
+      return;
+    }
     const vMember = db.prepare(
       'SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?'
     ).get(vch.id, socket.user.id);
-    if (!vMember) return;
+    if (!vMember) {
+      console.warn(`[VoiceDiag] voice-rejoin from ${socket.user.username} (id=${socket.user.id}) on ${code} REJECTED — not a channel member`);
+      socket.emit('voice-channel-gone', { code });
+      return;
+    }
+
+    // ── FAST PATH: pending grace-period eviction ───────────
+    // If this user disconnected within the last few seconds, the
+    // disconnect handler scheduled a deferred eviction instead of
+    // immediately wiping them. Cancel it and just rebind the socketId on
+    // the existing entry. This preserves their voiceUsers slot AND
+    // means peers were never told voice-user-left, so their
+    // RTCPeerConnections are still alive and audio continues
+    // uninterrupted — no panel blanking, no missing-self glitch.
+    const pendingKey = `${socket.user.id}:${code}`;
+    const pending = pendingVoiceLeave && pendingVoiceLeave.get(pendingKey);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingVoiceLeave.delete(pendingKey);
+      const existing = voiceUsers.get(code)?.get(socket.user.id);
+      if (existing) {
+        existing.socketId = socket.id;
+        socket.join(`voice:${code}`);
+        voiceLastActivity.set(socket.user.id, Date.now());
+        console.log(`[VoiceDiag] voice-rejoin FAST PATH: rebound ${socket.user.username} on ${code} to socket ${socket.id} (no peer churn)`);
+        // Tell the rejoining client about the current peer list so its
+        // own UI is fresh, but do NOT re-emit voice-user-joined to peers
+        // — they never saw us leave, so they don't need to renegotiate.
+        const existingUsers = Array.from(voiceUsers.get(code).values())
+          .filter(u => u.id !== socket.user.id);
+        const vchSettings = db.prepare('SELECT voice_bitrate FROM channels WHERE code = ?').get(code);
+        socket.emit('voice-existing-users', {
+          channelCode: code,
+          users: existingUsers.map(u => ({ id: u.id, username: u.username })),
+          voiceBitrate: vchSettings ? (vchSettings.voice_bitrate || 0) : 0,
+          // Hint to the client: skip building new RTCPeerConnections —
+          // existing ones from before the blip are still live.
+          skipRenegotiate: true
+        });
+        broadcastVoiceUsers(code);
+        broadcastStreamInfo(code);
+        return;
+      }
+      // No existing entry despite a pending timer — fall through to
+      // normal rejoin path below.
+    }
+    const _hadRoomEntry = !!voiceUsers.get(code)?.has(socket.user.id);
+    console.log(`[VoiceDiag] voice-rejoin: ${socket.user.username} (id=${socket.user.id}) on ${code} hadExisting=${_hadRoomEntry} newSocketId=${socket.id}`);
 
     for (const [prevCode, room] of voiceUsers) {
       if (room.has(socket.user.id) && prevCode !== code) {

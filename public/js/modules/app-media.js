@@ -61,12 +61,12 @@ _clearImageQueue() {
   this._renderImageQueue();
 },
 
-async _flushImageQueue(bundled = false) {
+async _flushImageQueue(bundled = false, personaPrefix = '') {
   if (!this._imageQueue || this._imageQueue.length === 0) return;
   const files = [...this._imageQueue];
   this._clearImageQueue();
   for (const file of files) {
-    await this._uploadImage(file, undefined, bundled);
+    await this._uploadImage(file, undefined, bundled, personaPrefix);
   }
 },
 
